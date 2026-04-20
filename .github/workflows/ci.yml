@@ -277,4 +277,5 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: TODO
-        run: echo "TODO: generate + sign TUF metadata, push to OCI registry, create GitHub release."
+        run: |
+          echo "TODO - generate + sign TUF metadata, push to OCI registry, create GitHub release."
