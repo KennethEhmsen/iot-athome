@@ -1,0 +1,32 @@
+# crate-ci/typos configuration.
+# https://github.com/crate-ci/typos
+
+[files]
+extend-exclude = [
+  "docs/build-doc/node_modules/**",
+  "target/**",
+  "panel/dist/**",
+  "panel/dev-dist/**",
+  "tools/devcerts/generated/**",
+  "**/*.lock",
+]
+
+[default]
+# Domain / product names and abbreviations.
+# `extend-identifiers` marks whole identifiers as valid so typos won't
+# split them and flag substrings (e.g. "BACnet" -> "BA", or "OTAs" -> "OT").
+extend-identifiers = [
+  "BACnet",
+  "AFE",
+  "OTAs",
+  "OTA",
+  "Mosquitto",
+  "mosquitto",
+]
+
+[default.extend-words]
+# Whole-word allow-list for spelling variants we use intentionally.
+unparseable = "unparseable"
+Unparseable = "Unparseable"
+mis         = "mis"          # we use "mis-" as a hyphenated prefix
+leafs       = "leafs"        # subject-tree terminology (§ADR-0004)
