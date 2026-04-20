@@ -110,11 +110,27 @@ missing_debug_implementations = "warn"
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
+
+# Pedantic/nursery suppressions — chosen to keep signal high on real bugs
+# while allowing ordinary, readable code. Revisit if a case repeatedly
+# bites us.
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 must_use_candidate = "allow"
-# ADR-0008 — panics in libraries are bugs
+doc_markdown = "allow"                     # flags every uppercase acronym
+derive_partial_eq_without_eq = "allow"     # noisy, not load-bearing
+missing_const_for_fn = "allow"             # nursery churn
+significant_drop_tightening = "allow"      # nursery false positives on locks
+option_if_let_else = "allow"               # stylistic
+redundant_pub_crate = "allow"              # stylistic
+use_self = "allow"                         # verbose in generated code
+cognitive_complexity = "allow"             # noisy
+branches_sharing_code = "allow"
+or_fun_call = "allow"                      # .unwrap_or_else is often fine
+
+# ADR-0008 — panics in libraries are bugs, but warn (not error) so tests
+# and the occasional #[allow] remain usable.
 unwrap_used = "warn"
 expect_used = "warn"
 panic = "warn"
