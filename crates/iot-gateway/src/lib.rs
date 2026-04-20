@@ -22,7 +22,9 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { listen: default_listen() }
+        Self {
+            listen: default_listen(),
+        }
     }
 }
 

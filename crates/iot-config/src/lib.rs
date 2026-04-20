@@ -90,8 +90,8 @@ pub fn load<T: DeserializeOwned>(paths: &Paths) -> Result<T, ConfigError> {
 /// round-trip; it is cheap and catches structural mistakes the service would
 /// otherwise hit only at use.
 pub fn validate(schema: &serde_json::Value, data: &serde_json::Value) -> Result<(), ConfigError> {
-    let validator = jsonschema::validator_for(schema)
-        .map_err(|e| ConfigError::Schema(e.to_string()))?;
+    let validator =
+        jsonschema::validator_for(schema).map_err(|e| ConfigError::Schema(e.to_string()))?;
     let result: Result<(), _> = validator.validate(data);
     match result {
         Ok(()) => Ok(()),

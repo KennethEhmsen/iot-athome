@@ -21,7 +21,10 @@ fn validate_token(t: &str) -> Result<(), SubjectError> {
     if t.is_empty() {
         return Err(SubjectError::Empty);
     }
-    if !t.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
+    if !t
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+    {
         return Err(SubjectError::BadChar(t.to_owned()));
     }
     Ok(())
@@ -104,7 +107,13 @@ mod tests {
 
     #[test]
     fn rejects_wildcards() {
-        assert!(matches!(device_state("*", "a", "b"), Err(SubjectError::BadChar(_))));
-        assert!(matches!(device_state(">", "a", "b"), Err(SubjectError::BadChar(_))));
+        assert!(matches!(
+            device_state("*", "a", "b"),
+            Err(SubjectError::BadChar(_))
+        ));
+        assert!(matches!(
+            device_state(">", "a", "b"),
+            Err(SubjectError::BadChar(_))
+        ));
     }
 }

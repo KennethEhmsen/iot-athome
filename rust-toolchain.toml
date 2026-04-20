@@ -1,5 +1,8 @@
 [toolchain]
-channel = "1.84.0"
+# Pin to latest stable. Several transitive deps (home 0.5.12, time 0.3.47)
+# have pushed MSRV aggressively; ADR-0002 lets us chase stable to keep
+# security-patch latency low.
+channel = "1.95.0"
 components = ["rustfmt", "clippy", "rust-src", "llvm-tools"]
 targets = [
   "x86_64-unknown-linux-gnu",

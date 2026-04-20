@@ -59,12 +59,10 @@ impl Config {
     pub fn from_env(publisher: impl Into<String>) -> Self {
         let dev_root = std::env::var("IOT_DEV_CERTS_ROOT")
             .unwrap_or_else(|_| "./tools/devcerts/generated".into());
-        let component = std::env::var("IOT_BUS_COMPONENT")
-            .unwrap_or_else(|_| "client".into());
+        let component = std::env::var("IOT_BUS_COMPONENT").unwrap_or_else(|_| "client".into());
         let dev = std::path::PathBuf::from(&dev_root);
         Self {
-            url: std::env::var("IOT_NATS_URL")
-                .unwrap_or_else(|_| "tls://127.0.0.1:4222".into()),
+            url: std::env::var("IOT_NATS_URL").unwrap_or_else(|_| "tls://127.0.0.1:4222".into()),
             ca_path: dev.join("ca").join("ca.crt"),
             client_cert_path: dev.join(&component).join(format!("{component}.crt")),
             client_key_path: dev.join(&component).join(format!("{component}.key")),
@@ -92,7 +90,10 @@ impl Bus {
             .connect(&cfg.url)
             .await?;
 
-        Ok(Self { client, publisher: cfg.publisher })
+        Ok(Self {
+            client,
+            publisher: cfg.publisher,
+        })
     }
 
     /// Publish a Protobuf-encoded payload. Headers are populated automatically.
@@ -111,7 +112,10 @@ impl Bus {
     ) -> Result<(), BusError> {
         let mut headers = extra_headers.unwrap_or_default();
         headers.insert(IOT_PUBLISHER, self.publisher.as_str());
-        headers.insert(IOT_SCHEMA_VERSION, iot_core::DEVICE_SCHEMA_VERSION.to_string().as_str());
+        headers.insert(
+            IOT_SCHEMA_VERSION,
+            iot_core::DEVICE_SCHEMA_VERSION.to_string().as_str(),
+        );
         headers.insert(IOT_TYPE, iot_type);
         headers.insert(CONTENT_TYPE, CONTENT_TYPE_PROTOBUF);
 

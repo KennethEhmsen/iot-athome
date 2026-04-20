@@ -43,7 +43,11 @@ pub enum AuditError {
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
     #[error("chain is broken at seq {seq}: expected prev {expected}, got {actual}")]
-    ChainBroken { seq: u64, expected: Hash, actual: Hash },
+    ChainBroken {
+        seq: u64,
+        expected: Hash,
+        actual: Hash,
+    },
 }
 
 /// Append-only handle to the audit log.
@@ -67,15 +71,26 @@ impl AuditLog {
         let (last_seq, last_hash) = replay_tail(&path).await?;
         Ok(Self {
             path,
-            inner: Mutex::new(Inner { last_seq, last_hash }),
+            inner: Mutex::new(Inner {
+                last_seq,
+                last_hash,
+            }),
         })
     }
 
     /// Append a new entry. Returns the stored entry (with assigned seq + hash).
-    pub async fn append(&self, kind: &str, payload: serde_json::Value) -> Result<Entry, AuditError> {
+    pub async fn append(
+        &self,
+        kind: &str,
+        payload: serde_json::Value,
+    ) -> Result<Entry, AuditError> {
         let mut inner = self.inner.lock().await;
 
-        let seq = if inner.last_hash.is_empty() { 0 } else { inner.last_seq + 1 };
+        let seq = if inner.last_hash.is_empty() {
+            0
+        } else {
+            inner.last_seq + 1
+        };
         let prev = inner.last_hash.clone();
         let at = Utc::now();
 
@@ -88,7 +103,14 @@ impl AuditLog {
         ctx.update(canonical.as_bytes());
         let hash = hex::encode_lower(ctx.finish().as_ref());
 
-        let entry = Entry { seq, prev, at, kind: kind.to_owned(), payload, hash: hash.clone() };
+        let entry = Entry {
+            seq,
+            prev,
+            at,
+            kind: kind.to_owned(),
+            payload,
+            hash: hash.clone(),
+        };
 
         let line = serde_json::to_string(&entry)?;
         let mut f = OpenOptions::new()
@@ -201,8 +223,12 @@ mod tests {
     async fn append_and_verify() {
         let tmp = tempfile_path();
         let log = AuditLog::open(&tmp).await.expect("open");
-        log.append("test.first", json!({"x": 1})).await.expect("append");
-        log.append("test.second", json!({"x": 2})).await.expect("append");
+        log.append("test.first", json!({"x": 1}))
+            .await
+            .expect("append");
+        log.append("test.second", json!({"x": 2}))
+            .await
+            .expect("append");
         log.verify().await.expect("verify");
         std::fs::remove_file(&tmp).ok();
     }
@@ -215,7 +241,10 @@ mod tests {
 
     fn ulid_like() -> String {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
         format!("{nanos:x}")
     }
 }

@@ -5,5 +5,5 @@ use_field_init_shorthand = true
 use_try_shorthand = true
 reorder_imports = true
 reorder_modules = true
-imports_granularity = "Module"
-group_imports = "StdExternalCrate"
+# imports_granularity / group_imports require nightly rustfmt; we'll
+# enable them once we move to nightly fmt or stable lifts them.

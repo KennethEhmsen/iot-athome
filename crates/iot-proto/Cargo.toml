@@ -5,18 +5,27 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "IoT-AtHome — wire-format constants, bus subject builders, and (eventually) generated Protobuf types."
+description = "IoT-AtHome — Protobuf types, gRPC service stubs, and bus subject builders."
+build = "build.rs"
 
 [lints]
 workspace = true
 
 [dependencies]
-# Protobuf codegen will land here in a later milestone (see schemas/buf.gen.yaml).
-# For W1 this crate exposes hand-written constants that mirror the .proto files
-# exactly — enough to build subject strings and set header keys without pulling
-# protoc into every developer's machine.
+# Generated code uses prost for message types and tonic for gRPC services.
+prost.workspace = true
+prost-types.workspace = true
+tonic.workspace = true
+
+# Non-generated helpers.
 serde.workspace = true
 thiserror.workspace = true
+
+[build-dependencies]
+# protox parses .proto files in pure Rust. No protoc binary needed on any
+# platform — critical for Windows / Nix / reproducible builds.
+protox.workspace = true
+tonic-build.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
