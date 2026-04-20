@@ -1,0 +1,44 @@
+// SPDX-License-Identifier: Apache-2.0
+// IoT-AtHome — bus envelope metadata (ADR-0004, ADR-0009).
+//
+// Most payloads on NATS are one of the concrete messages from iot.device.v1
+// (EntityState, EntityEvent, Command, ...) encoded as raw Protobuf bytes.
+// Cross-cutting metadata travels in NATS *headers*, not inside the payload,
+// so consumers can filter without decoding.
+
+syntax = "proto3";
+
+package iot.bus.v1;
+
+// Canonical list of header keys carried on every NATS message.
+// This message is NEVER serialized to the wire. It documents the
+// contract so every producer/consumer uses identical strings.
+//
+// Code generation intent: produce `pub const IOT_SCHEMA_VERSION: &str = "iot-schema-version";`
+// via a tiny build.rs helper in iot-proto.
+message BusHeaders {
+  // Required. W3C Trace Context "traceparent" header.
+  // Key: "traceparent"
+  string traceparent = 1;
+
+  // Optional. W3C Trace Context "tracestate" header.
+  // Key: "tracestate"
+  string tracestate = 2;
+
+  // Required. Payload Protobuf major schema version ("1", "2", ...).
+  // Key: "iot-schema-version"
+  string iot_schema_version = 3;
+
+  // Required. Fully-qualified Protobuf type name, e.g.
+  // "iot.device.v1.EntityEvent". Enables untyped consumers (audit, panel).
+  // Key: "iot-type"
+  string iot_type = 4;
+
+  // Optional. Publisher identity (plugin_id or service name).
+  // Key: "iot-publisher"
+  string iot_publisher = 5;
+
+  // Optional. Content-Type. Defaults to "application/x-protobuf".
+  // Key: "content-type"
+  string content_type = 6;
+}

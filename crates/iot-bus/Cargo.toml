@@ -1,0 +1,27 @@
+[package]
+name = "iot-bus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "IoT-AtHome — NATS JetStream client wrapper with mTLS and trace-propagation defaults."
+
+[lints]
+workspace = true
+
+[dependencies]
+iot-core = { path = "../iot-core" }
+iot-proto = { path = "../iot-proto" }
+
+async-nats.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tracing.workspace = true
+
+[dev-dependencies]
+testcontainers.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

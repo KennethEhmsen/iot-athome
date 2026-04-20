@@ -1,0 +1,28 @@
+# Normalize line endings to LF across platforms.
+# Windows devs will see LF in checkouts; the project is Linux-targeted.
+
+* text=auto eol=lf
+
+# Shell scripts must stay LF regardless.
+*.sh   text eol=lf
+*.bash text eol=lf
+
+# Binaries — never modify.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.svg  text
+*.pdf  binary
+*.docx binary
+*.xlsx binary
+*.pptx binary
+*.zip  binary
+*.wasm binary
+
+# Rust lockfile — check in, don't mark linguist-generated so diffs stay readable.
+Cargo.lock text eol=lf
+
+# Generated code should exist; don't exclude from diffs.
+/crates/iot-proto/src/generated/** linguist-generated=true text eol=lf

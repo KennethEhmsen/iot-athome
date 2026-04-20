@@ -1,0 +1,22 @@
+// SPDX-License-Identifier: Apache-2.0
+// IoT-AtHome — shared identifier and time primitives.
+//
+// Versioning: see ADR-0005. Do NOT rename fields or reuse tags.
+
+syntax = "proto3";
+
+package iot.common.v1;
+
+// Stable ULID (26-char Crockford base32, lexicographic).
+// All device, plugin, rule, and user IDs use this format.
+message Ulid {
+  // 26 ASCII characters. Validated at boundaries.
+  string value = 1;
+}
+
+// Monotonic nanoseconds since Unix epoch. Preferred over
+// google.protobuf.Timestamp when we want millisecond-or-better ordering
+// guarantees from the hub clock without TZ complications.
+message MonoTimestamp {
+  int64 unix_nanos = 1;
+}

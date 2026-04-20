@@ -1,0 +1,17 @@
+[package]
+name = "iot-plugin-sdk-rust"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "IoT-AtHome — Rust SDK for writing WASM Component Model plugins."
+
+[lints]
+workspace = true
+
+[dependencies]
+iot-core = { path = "../iot-core" }
+iot-proto = { path = "../iot-proto" }
+serde.workspace = true
+thiserror.workspace = true

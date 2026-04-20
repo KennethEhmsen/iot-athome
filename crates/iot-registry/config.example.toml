@@ -1,0 +1,12 @@
+# iot-registry — example configuration.
+# See ADR-0010 for layering semantics.
+
+config_version = 1
+
+# Where the service listens for gRPC admin traffic.
+listen = "127.0.0.1:50051"
+
+# Database URL.
+#   sqlite://<path>   — default for small deployments.
+#   postgres://...    — for larger deployments; ADR-0007 for migration rules.
+database_url = "sqlite:///var/lib/iotathome/registry.db"

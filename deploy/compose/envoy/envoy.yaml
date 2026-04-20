@@ -1,0 +1,99 @@
+# Envoy — dev config.
+# External TLS terminator in front of iot-gateway. Per design §3 / §11.
+# In dev, the upstream iot-gateway runs on the host; compose uses host.docker.internal.
+
+static_resources:
+
+  listeners:
+    - name: https
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 8443 }
+      filter_chains:
+        - transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              common_tls_context:
+                tls_certificates:
+                  - certificate_chain: { filename: /etc/envoy/certs/envoy.crt }
+                    private_key:       { filename: /etc/envoy/certs/envoy.key }
+                validation_context:
+                  trusted_ca: { filename: /etc/envoy/ca/ca.crt }
+              # Dev: don't require client certs. Production gateway profile enables mTLS.
+              require_client_certificate: false
+          filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: iot_gateway_ingress
+                codec_type: AUTO
+                tracing:
+                  provider:
+                    name: envoy.tracers.opentelemetry
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+                      grpc_service:
+                        envoy_grpc: { cluster_name: tempo_otlp }
+                      service_name: iot-envoy
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+                route_config:
+                  name: default
+                  virtual_hosts:
+                    - name: default
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/api/" }
+                          route: { cluster: iot_gateway }
+                        - match: { prefix: "/stream" }
+                          route:
+                            cluster: iot_gateway
+                            upgrade_configs:
+                              - upgrade_type: websocket
+                        - match: { prefix: "/realms/" }
+                          route: { cluster: keycloak }
+                        - match: { prefix: "/" }
+                          direct_response:
+                            status: 404
+                            body: { inline_string: "Not found\n" }
+
+  clusters:
+    - name: iot_gateway
+      connect_timeout: 1s
+      type: LOGICAL_DNS
+      load_assignment:
+        cluster_name: iot_gateway
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: host.docker.internal, port_value: 8081 }
+
+    - name: keycloak
+      connect_timeout: 1s
+      type: LOGICAL_DNS
+      load_assignment:
+        cluster_name: keycloak
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: keycloak, port_value: 8080 }
+
+    - name: tempo_otlp
+      connect_timeout: 1s
+      type: LOGICAL_DNS
+      http2_protocol_options: {}
+      load_assignment:
+        cluster_name: tempo_otlp
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: tempo, port_value: 4317 }
+
+admin:
+  address:
+    socket_address: { address: 0.0.0.0, port_value: 19000 }

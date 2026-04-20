@@ -1,0 +1,55 @@
+// SPDX-License-Identifier: Apache-2.0
+// IoT-AtHome — Device Registry gRPC service (v1).
+
+syntax = "proto3";
+
+package iot.registry.v1;
+
+import "iot/common/v1/ids.proto";
+import "iot/device/v1/device.proto";
+
+service RegistryService {
+  // Upsert a device. Returns the stored (canonical) record.
+  rpc UpsertDevice(UpsertDeviceRequest) returns (UpsertDeviceResponse);
+
+  // Fetch a device by ULID.
+  rpc GetDevice(GetDeviceRequest) returns (GetDeviceResponse);
+
+  // List devices with optional filters. Server-streaming for large fleets.
+  rpc ListDevices(ListDevicesRequest) returns (stream ListDevicesResponse);
+
+  // Remove a device. Emits an audit event.
+  rpc DeleteDevice(DeleteDeviceRequest) returns (DeleteDeviceResponse);
+}
+
+message UpsertDeviceRequest {
+  iot.device.v1.Device device = 1;
+  // Optional idempotency key (by-convention external id hash).
+  string idempotency_key = 2;
+}
+message UpsertDeviceResponse {
+  iot.device.v1.Device device = 1;
+  bool created = 2;
+}
+
+message GetDeviceRequest {
+  iot.common.v1.Ulid id = 1;
+}
+message GetDeviceResponse {
+  iot.device.v1.Device device = 1;
+}
+
+message ListDevicesRequest {
+  string integration = 1; // filter by plugin id (optional)
+  string room = 2;        // filter by room (optional)
+}
+message ListDevicesResponse {
+  iot.device.v1.Device device = 1;
+}
+
+message DeleteDeviceRequest {
+  iot.common.v1.Ulid id = 1;
+}
+message DeleteDeviceResponse {
+  bool deleted = 1;
+}

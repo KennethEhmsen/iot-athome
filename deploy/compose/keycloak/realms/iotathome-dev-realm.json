@@ -1,0 +1,134 @@
+{
+  "realm": "iotathome",
+  "enabled": true,
+  "displayName": "IoT-AtHome (dev)",
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": true,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": true,
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "requiredCredentials": ["password"],
+  "passwordPolicy": "length(12) and notUsername and specialChars(1) and upperCase(1) and digits(1)",
+
+  "roles": {
+    "realm": [
+      { "name": "iot-admin",    "description": "Full admin access to the hub." },
+      { "name": "iot-operator", "description": "Device and automation management." },
+      { "name": "iot-user",     "description": "Everyday household user." },
+      { "name": "iot-guest",    "description": "Read-only guest access." }
+    ]
+  },
+
+  "groups": [
+    { "name": "Household",    "realmRoles": ["iot-user"] },
+    { "name": "Operators",    "realmRoles": ["iot-user", "iot-operator"] },
+    { "name": "Administrators", "realmRoles": ["iot-user", "iot-operator", "iot-admin"] }
+  ],
+
+  "users": [
+    {
+      "username": "admin",
+      "enabled": true,
+      "email": "admin@iot.local",
+      "firstName": "Dev",
+      "lastName": "Admin",
+      "emailVerified": true,
+      "credentials": [
+        { "type": "password", "value": "DevPass!234", "temporary": false }
+      ],
+      "groups": ["Administrators"]
+    },
+    {
+      "username": "operator",
+      "enabled": true,
+      "email": "operator@iot.local",
+      "credentials": [
+        { "type": "password", "value": "DevPass!234", "temporary": false }
+      ],
+      "groups": ["Operators"]
+    },
+    {
+      "username": "user",
+      "enabled": true,
+      "email": "user@iot.local",
+      "credentials": [
+        { "type": "password", "value": "DevPass!234", "temporary": false }
+      ],
+      "groups": ["Household"]
+    }
+  ],
+
+  "clients": [
+    {
+      "clientId": "iot-panel",
+      "name": "IoT-AtHome Panel (PWA)",
+      "enabled": true,
+      "publicClient": true,
+      "redirectUris": [
+        "http://localhost:5173/*",
+        "http://localhost:8443/*",
+        "https://localhost:8443/*",
+        "https://panel.iot.local/*"
+      ],
+      "webOrigins": ["+"],
+      "protocol": "openid-connect",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:5173/*##https://panel.iot.local/*"
+      },
+      "defaultClientScopes": ["profile", "email", "roles"],
+      "optionalClientScopes": ["offline_access"]
+    },
+    {
+      "clientId": "iot-gateway",
+      "name": "IoT-AtHome Gateway (service)",
+      "enabled": true,
+      "publicClient": false,
+      "bearerOnly": true,
+      "protocol": "openid-connect",
+      "attributes": {}
+    },
+    {
+      "clientId": "iot-cli",
+      "name": "iotctl (native)",
+      "enabled": true,
+      "publicClient": true,
+      "redirectUris": ["http://localhost:0/*"],
+      "protocol": "openid-connect",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "attributes": { "pkce.code.challenge.method": "S256" }
+    }
+  ],
+
+  "clientScopes": [
+    {
+      "name": "iot-scopes",
+      "description": "IoT-AtHome scopes exposed on all access tokens.",
+      "protocol": "openid-connect",
+      "attributes": { "include.in.token.scope": "true", "display.on.consent.screen": "true" },
+      "protocolMappers": [
+        {
+          "name": "realm-roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "config": {
+            "multivalued": "true",
+            "userinfo.token.claim": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "realm_access.roles",
+            "jsonType.label": "String"
+          }
+        }
+      ]
+    }
+  ]
+}

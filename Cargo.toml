@@ -1,0 +1,138 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/iot-core",
+  "crates/iot-proto",
+  "crates/iot-bus",
+  "crates/iot-registry",
+  "crates/iot-automation",
+  "crates/iot-gateway",
+  "crates/iot-plugin-host",
+  "crates/iot-plugin-sdk-rust",
+  "crates/iot-audit",
+  "crates/iot-observability",
+  "crates/iot-config",
+  "crates/iot-cli",
+]
+exclude = [
+  "plugins/*",
+  "firmware/*",
+  "services/ml",
+  "panel",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.84"
+authors = ["IoT-AtHome"]
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/iot-athome/iot-athome"
+
+[workspace.dependencies]
+# --- async runtime (ADR-0002) ---
+tokio = { version = "1.42", default-features = false }
+tokio-util = { version = "0.7", default-features = false }
+futures = { version = "0.3", default-features = false }
+async-trait = "0.1"
+
+# --- error handling (ADR-0008) ---
+thiserror = "2.0"
+anyhow = "1.0"
+
+# --- observability (ADR-0009) ---
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-opentelemetry = "0.28"
+opentelemetry = "0.27"
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.27", features = ["tonic"] }
+
+# --- config (ADR-0010) ---
+figment = { version = "0.10", features = ["toml", "env"] }
+jsonschema = "0.26"
+
+# --- protobuf / grpc ---
+prost = "0.13"
+prost-types = "0.13"
+tonic = { version = "0.12", features = ["tls-webpki-roots"] }
+tonic-build = "0.12"
+
+# --- http / ws ---
+axum = { version = "0.8", features = ["ws", "macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+hyper = "1.5"
+
+# --- bus ---
+async-nats = "0.38"
+
+# --- storage ---
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "macros", "sqlite", "postgres", "migrate", "chrono", "uuid"] }
+
+# --- crypto / identity ---
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rustls-pemfile = "2.2"
+ring = "0.17"
+sigstore = "0.10"
+
+# --- serde / ids / time ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+ulid = { version = "1.1", features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+uuid = { version = "1.11", features = ["v4", "v7", "serde"] }
+
+# --- wasm plugin host (ADR-0003) ---
+wasmtime = { version = "27", features = ["component-model", "async"] }
+wasmtime-wasi = "27"
+wit-bindgen = "0.36"
+
+# --- cli ---
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# --- testing ---
+tokio-test = "0.4"
+testcontainers = "0.23"
+insta = "1.41"
+rstest = "0.23"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+# ADR-0008 — panics in libraries are bugs
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+overflow-checks = true
+
+[profile.release-debuginfo]
+inherits = "release"
+strip = "none"
+debug = true
+
+[profile.dev]
+opt-level = 0
+debug = true
+incremental = true
+
+[profile.test]
+opt-level = 1

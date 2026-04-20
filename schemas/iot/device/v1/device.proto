@@ -1,0 +1,97 @@
+// SPDX-License-Identifier: Apache-2.0
+// IoT-AtHome — canonical device model (v1).
+//
+// Versioning: per ADR-0005 — additive changes only within a major version.
+// Never reuse a removed field tag; put removals into `reserved`.
+
+syntax = "proto3";
+
+package iot.device.v1;
+
+import "google/protobuf/timestamp.proto";
+import "iot/common/v1/ids.proto";
+
+// Canonical device record. One entry per physical device, regardless of
+// protocol. Plugins translate protocol frames into events against entities
+// owned by a Device.
+message Device {
+  // Stable ULID. Never changes across renames, room moves, protocol migrations.
+  iot.common.v1.Ulid id = 1;
+
+  // Plugin that owns the device. Matches the plugin manifest `id` field.
+  string integration = 2;
+
+  // The protocol-native identifier (e.g. Zigbee IEEE address, Matter node ID).
+  // Opaque to the core; the owning plugin knows how to parse it.
+  string external_id = 3;
+
+  string manufacturer = 4;
+  string model = 5;
+
+  // High-level capability tags (e.g. "temperature", "motion", "lock").
+  // Stable names drawn from iot.device.v1.CapabilityCatalog (TODO: separate file).
+  repeated string capabilities = 6;
+
+  // Entities exposed by the device (readable/writable signals).
+  repeated Entity entities = 7;
+
+  // User-facing room assignments. Mutable; NOT part of identity.
+  repeated string rooms = 8;
+
+  TrustLevel trust_level = 9;
+
+  // Last time the device sent any signal. Used for liveness.
+  google.protobuf.Timestamp last_seen = 10;
+
+  // Optional human-facing label. Mutable; NOT part of identity.
+  string label = 11;
+
+  // Opaque plugin-owned metadata. Shape defined by the plugin.
+  map<string, string> plugin_meta = 12;
+
+  // Schema version the producer stamped this with; upcast performed by the
+  // registry if the consumer expects a higher major.
+  // NOTE: also carried as a bus header `iot-schema-version` — this field is
+  // the authoritative value when the record is read from storage.
+  uint32 schema_version = 13;
+
+  reserved 14 to 19;
+}
+
+message Entity {
+  // Stable within the parent device. ULID.
+  iot.common.v1.Ulid id = 1;
+
+  // Semantic type. Drawn from a stable catalog (e.g.
+  // "sensor.temperature", "binary_sensor.motion", "switch", "cover",
+  // "lock", "climate.thermostat").
+  string type = 2;
+
+  // Canonical unit (SI where applicable). Empty for unit-less entities.
+  string unit = 3;
+
+  ReadWrite rw = 4;
+
+  // Device class (OPTIONAL additional classifier, e.g.
+  // "total_increasing" for energy counters, "power" for watts).
+  string device_class = 5;
+
+  // Opaque plugin metadata.
+  map<string, string> meta = 6;
+
+  reserved 7 to 15;
+}
+
+enum ReadWrite {
+  READ_WRITE_UNSPECIFIED = 0;
+  READ_WRITE_READ = 1;
+  READ_WRITE_WRITE = 2;
+  READ_WRITE_READ_WRITE = 3;
+}
+
+enum TrustLevel {
+  TRUST_LEVEL_UNSPECIFIED = 0;
+  TRUST_LEVEL_DISCOVERED = 1;    // seen by a scan, not yet accepted.
+  TRUST_LEVEL_USER_ADDED = 2;    // manually paired by a user.
+  TRUST_LEVEL_VERIFIED = 3;      // attestation (Matter, signed firmware).
+}

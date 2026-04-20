@@ -1,0 +1,7 @@
+# iot-plugin-host — example configuration.
+
+config_version = 1
+
+# Where installed plugins live on disk. Each subdirectory is one plugin
+# (with its manifest, signed WASM / OCI artifact, and SBOM).
+plugin_dir = "/var/lib/iotathome/plugins"

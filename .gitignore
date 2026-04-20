@@ -1,0 +1,71 @@
+# --- Rust ---
+/target/
+**/target/
+Cargo.lock.backup
+*.pdb
+
+# --- Node / Panel ---
+node_modules/
+.pnpm-store/
+dist/
+.vite/
+.turbo/
+
+# --- Python / ML service ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.uv-cache/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
+
+# --- Firmware / ESP-IDF / PlatformIO ---
+.pio/
+.pioenvs/
+.piolibdeps/
+build/
+sdkconfig.old
+managed_components/
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*.bak
+.DS_Store
+Thumbs.db
+
+# --- Secrets / local state (ADR-0006, ADR-0010) ---
+/tools/devcerts/generated/
+/var/
+/run/
+*.pem
+*.key
+*.p12
+*.creds
+!tools/devcerts/ca.template.cnf
+.envrc.local
+
+# --- Nix ---
+.direnv/
+result
+result-*
+
+# --- CI / build artifacts ---
+*.sbom.json
+*.attestation
+*.sig
+*.intoto.jsonl
+sbom/
+attestations/
+
+# --- Local dev scratch ---
+/scratch/
+/.local/
+
+# --- Agent session metadata (not part of the project) ---
+/.claude/

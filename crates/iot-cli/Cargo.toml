@@ -1,0 +1,31 @@
+[package]
+name = "iot-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "IoT-AtHome — iotctl admin CLI."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "iotctl"
+path = "src/main.rs"
+
+[dependencies]
+iot-core = { path = "../iot-core" }
+iot-proto = { path = "../iot-proto" }
+iot-bus = { path = "../iot-bus" }
+iot-observability = { path = "../iot-observability" }
+
+anyhow.workspace = true
+async-nats.workspace = true
+clap.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tracing.workspace = true
+ulid.workspace = true

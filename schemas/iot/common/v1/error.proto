@@ -1,0 +1,28 @@
+// SPDX-License-Identifier: Apache-2.0
+// IoT-AtHome — over-the-wire error envelope (ADR-0008).
+
+syntax = "proto3";
+
+package iot.common.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// Single error shape for every inter-service and plugin-ABI return value.
+// Stable, greppable, programmable.
+message ErrorEnvelope {
+  // Stable dotted-namespace code. Safe to branch on.
+  // Example: "registry.device.not_found", "plugin.capability.denied".
+  string code = 1;
+
+  // Human-readable description. NOT for programmatic branching.
+  string message = 2;
+
+  // Structured detail. Keep keys short and stable.
+  map<string, string> detail = 3;
+
+  // W3C trace_id hex (32 chars). Correlates to the tracing backend.
+  string trace_id = 4;
+
+  // Wall-clock time the error was constructed.
+  google.protobuf.Timestamp at = 5;
+}

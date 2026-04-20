@@ -1,0 +1,11 @@
+version: v2
+plugins:
+  - remote: buf.build/community/neoeinstein-prost
+    out: ../crates/iot-proto/src/generated
+    opt:
+      - bytes=.
+  - remote: buf.build/community/neoeinstein-tonic
+    out: ../crates/iot-proto/src/generated
+    opt:
+      - no_server=false
+      - no_client=false

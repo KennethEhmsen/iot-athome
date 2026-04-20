@@ -1,0 +1,19 @@
+# Cross-compilation linker configuration for the Raspberry Pi (aarch64) target.
+# Developers installing `aarch64-linux-gnu-gcc` (or using the Nix dev shell) can
+# run `cargo build --target aarch64-unknown-linux-gnu` without further flags.
+#
+# CI uses `cross` which sidesteps this; keep this file in sync with the `cross`
+# version pinned in the workflow.
+
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+
+[target.wasm32-wasip2]
+# Placeholder — plugin builds do not need a custom linker today.
+
+[net]
+git-fetch-with-cli = true
+
+[build]
+# Pipelined LTO for release builds is pinned in Cargo.toml; keep the default
+# here so developer builds stay incremental.

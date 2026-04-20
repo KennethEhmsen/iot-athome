@@ -1,0 +1,7 @@
+# iot-automation — example configuration.
+
+config_version = 1
+
+# Directory containing *.rule.yaml declarative rule files.
+# The engine compiles them into a DAG at startup and watches for changes.
+rules_dir = "/etc/iotathome/rules"

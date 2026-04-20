@@ -1,0 +1,22 @@
+[package]
+name = "iot-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "IoT-AtHome — wire-format constants, bus subject builders, and (eventually) generated Protobuf types."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Protobuf codegen will land here in a later milestone (see schemas/buf.gen.yaml).
+# For W1 this crate exposes hand-written constants that mirror the .proto files
+# exactly — enough to build subject strings and set header keys without pulling
+# protoc into every developer's machine.
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true

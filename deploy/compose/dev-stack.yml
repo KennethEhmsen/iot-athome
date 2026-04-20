@@ -1,0 +1,170 @@
+# IoT-AtHome — local dev stack.
+#
+# Spins up the infrastructure services a developer needs:
+#   - NATS JetStream (mTLS)
+#   - Mosquitto (mTLS, no anonymous listener — per MQTT §5.5 of design)
+#   - Keycloak (OIDC IdP)
+#   - Envoy (API gateway front, mTLS terminator)
+#   - Tempo / Loki / Prometheus / Grafana (observability)
+#
+# Run `just certs` first, then `just dev`.
+#
+# Hostnames: each service is reachable from the host at localhost:<port>,
+# and from other containers by its compose name (e.g. `nats`, `mosquitto`).
+# Certificates have SANs covering both `<service>.iot.local` and `localhost`.
+
+name: iot-athome-dev
+
+networks:
+  iot:
+    driver: bridge
+
+volumes:
+  nats-data:
+  keycloak-data:
+  loki-data:
+  tempo-data:
+  prom-data:
+  grafana-data:
+
+services:
+
+  # --- NATS JetStream (ADR-0004) ---
+  nats:
+    image: nats:2.10-alpine
+    container_name: iot-nats
+    restart: unless-stopped
+    command:
+      - "-c"
+      - "/etc/nats/nats.conf"
+    ports:
+      - "4222:4222"   # client (TLS)
+      - "8222:8222"   # monitoring http
+    volumes:
+      - ./nats/nats.conf:/etc/nats/nats.conf:ro
+      - ../../tools/devcerts/generated/nats:/etc/nats/certs:ro
+      - ../../tools/devcerts/generated/ca:/etc/nats/ca:ro
+      - nats-data:/data
+    networks:
+      iot:
+        aliases:
+          - nats.iot.local
+
+  # --- Mosquitto MQTT broker (§5.1) ---
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: iot-mosquitto
+    restart: unless-stopped
+    ports:
+      - "8883:8883"   # TLS
+      - "8884:8884"   # mTLS (device certs)
+      - "9001:9001"   # WSS
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ../../tools/devcerts/generated/mosquitto:/mosquitto/certs:ro
+      - ../../tools/devcerts/generated/ca:/mosquitto/ca:ro
+    networks:
+      iot:
+        aliases:
+          - mosquitto.iot.local
+
+  # --- Keycloak (OIDC) ---
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    container_name: iot-keycloak
+    restart: unless-stopped
+    # `start-dev --import-realm` loads everything from /opt/keycloak/data/import
+    # on first boot. Subsequent boots ignore the files unless the realm is
+    # absent (survives container restarts; reset via `just dev-nuke`).
+    command: ["start-dev", "--hostname=localhost", "--http-port=8080", "--import-realm"]
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin   # DEV ONLY; see ADR-0006
+    ports:
+      - "8080:8080"
+    volumes:
+      - keycloak-data:/opt/keycloak/data
+      - ./keycloak/realms:/opt/keycloak/data/import:ro
+    networks:
+      iot:
+        aliases:
+          - keycloak.iot.local
+
+  # --- Envoy (API gateway, external TLS terminator) ---
+  envoy:
+    image: envoyproxy/envoy:v1.32-latest
+    container_name: iot-envoy
+    restart: unless-stopped
+    command: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "info"]
+    ports:
+      - "8443:8443"   # external HTTPS (mTLS-optional)
+      - "19000:19000" # admin
+    volumes:
+      - ./envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro
+      - ../../tools/devcerts/generated/envoy:/etc/envoy/certs:ro
+      - ../../tools/devcerts/generated/ca:/etc/envoy/ca:ro
+    networks:
+      iot:
+        aliases:
+          - envoy.iot.local
+    depends_on: [keycloak]
+
+  # --- Observability: Tempo (traces) ---
+  tempo:
+    image: grafana/tempo:2.6.1
+    container_name: iot-tempo
+    restart: unless-stopped
+    command: ["-config.file=/etc/tempo.yaml"]
+    ports:
+      - "3200:3200"    # HTTP
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP
+    volumes:
+      - ./tempo/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    networks: [iot]
+
+  # --- Observability: Loki (logs) ---
+  loki:
+    image: grafana/loki:3.3.0
+    container_name: iot-loki
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./loki/loki.yaml:/etc/loki/loki.yaml:ro
+      - loki-data:/loki
+    networks: [iot]
+
+  # --- Observability: Prometheus (metrics) ---
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    container_name: iot-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom-data:/prometheus
+    networks: [iot]
+
+  # --- Grafana (dashboards) ---
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: iot-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    networks: [iot]
+    depends_on: [tempo, loki, prometheus]

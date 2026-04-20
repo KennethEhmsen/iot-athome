@@ -1,0 +1,6 @@
+# iot-gateway — example configuration.
+
+config_version = 1
+
+# Gateway business-logic listener (Envoy proxies here).
+listen = "127.0.0.1:8081"

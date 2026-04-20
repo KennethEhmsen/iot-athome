@@ -1,0 +1,31 @@
+[package]
+name = "iot-gateway"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "IoT-AtHome — HTTP + WebSocket gateway in front of Envoy (ADR-0009, design §11)."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "iot-gateway"
+path = "src/main.rs"
+
+[dependencies]
+iot-core = { path = "../iot-core" }
+iot-proto = { path = "../iot-proto" }
+iot-bus = { path = "../iot-bus" }
+iot-config = { path = "../iot-config" }
+iot-observability = { path = "../iot-observability" }
+
+anyhow.workspace = true
+axum.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "net"] }
+tower.workspace = true
+tower-http.workspace = true
+tracing.workspace = true

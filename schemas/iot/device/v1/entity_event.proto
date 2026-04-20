@@ -1,0 +1,60 @@
+// SPDX-License-Identifier: Apache-2.0
+// IoT-AtHome — entity state, events, and commands (v1).
+
+syntax = "proto3";
+
+package iot.device.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+import "iot/common/v1/ids.proto";
+
+// Authoritative state for an entity. Published on
+//   device.<plugin_id>.<device_id>.<entity_id>.state
+// JetStream keeps the last message per subject.
+message EntityState {
+  iot.common.v1.Ulid device_id = 1;
+  iot.common.v1.Ulid entity_id = 2;
+  google.protobuf.Value value = 3; // scalar/string/bool/struct/list
+  google.protobuf.Timestamp at = 4;
+  uint32 schema_version = 15;      // mirror of device.Device.schema_version
+}
+
+// Discrete event. Published on
+//   device.<plugin_id>.<device_id>.<entity_id>.event
+message EntityEvent {
+  iot.common.v1.Ulid device_id = 1;
+  iot.common.v1.Ulid entity_id = 2;
+  string kind = 3;                 // "pressed", "double_pressed", "motion_detected"
+  google.protobuf.Struct payload = 4;
+  google.protobuf.Timestamp at = 5;
+  uint32 schema_version = 15;
+}
+
+// Availability flap. Published on
+//   device.<plugin_id>.<device_id>.avail
+message DeviceAvailability {
+  iot.common.v1.Ulid device_id = 1;
+  bool online = 2;
+  google.protobuf.Timestamp at = 3;
+  string reason = 4;               // optional human hint
+}
+
+// Command. Sent on
+//   cmd.<plugin_id>.<device_id>.<entity_id>
+// Owning plugin acknowledges via an EntityState update.
+message Command {
+  iot.common.v1.Ulid device_id = 1;
+  iot.common.v1.Ulid entity_id = 2;
+  string action = 3;               // "turn_on", "set_value", "lock"
+  google.protobuf.Value value = 4;
+
+  // Idempotency key. Repeated publishes with the same key are no-ops.
+  string idempotency_key = 5;
+
+  // Who issued the command. Used in audit.
+  string issued_by = 6;
+
+  google.protobuf.Timestamp at = 7;
+  uint32 schema_version = 15;
+}

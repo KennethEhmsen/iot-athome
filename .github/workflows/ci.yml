@@ -1,0 +1,280 @@
+# IoT-AtHome CI — per plan §5 and ADR-0006.
+#
+# Stages:
+#   preflight -> build-matrix -> test -> integration -> sbom -> vuln-scan -> sign -> reproducibility -> publish
+#
+# Every feature PR must pass preflight through sbom. Sign/reproducibility/publish
+# gate tagged releases only.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write          # required for cosign keyless
+  attestations: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0     # deterministic builds
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+
+  # -------------------- 1. Preflight --------------------
+  preflight:
+    name: preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.84.0
+          components: rustfmt, clippy
+      - uses: bufbuild/buf-action@v1
+        with: { setup_only: true }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+
+      - name: typos
+        uses: crate-ci/typos@v1
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: buf lint
+        run: buf lint schemas
+
+      - name: buf breaking
+        if: github.event_name == 'pull_request'
+        run: buf breaking schemas --against 'https://github.com/${{ github.repository }}.git#branch=main,subdir=schemas'
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: panel lint
+        if: hashFiles('panel/package.json') != ''
+        run: |
+          pnpm -C panel install --frozen-lockfile
+          pnpm -C panel lint
+
+      - name: ml ruff
+        if: hashFiles('services/ml/pyproject.toml') != ''
+        run: |
+          pipx install uv
+          uv --project services/ml run ruff check
+
+  # -------------------- 2. Build matrix --------------------
+  build:
+    name: build-${{ matrix.target }}
+    needs: preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - wasm32-wasip2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.84.0
+          targets: ${{ matrix.target }}
+      - name: install cross (aarch64 only)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: cargo install cross --locked
+      - name: build
+        run: |
+          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+            cross build --workspace --release --target ${{ matrix.target }}
+          else
+            cargo build --workspace --release --target ${{ matrix.target }}
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/iot-*
+          if-no-files-found: ignore
+
+  # -------------------- 3. Unit tests --------------------
+  test:
+    name: test
+    needs: preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.84.0
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - name: cargo nextest
+        run: cargo nextest run --workspace --all-targets
+
+  # -------------------- 4. Integration --------------------
+  integration:
+    name: integration
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.84.0
+      - name: bring up dev infra
+        run: |
+          ./tools/devcerts/mint.sh
+          docker compose -f deploy/compose/dev-stack.yml up -d nats mosquitto
+          # Wait for readiness. NATS 8222 is plaintext monitoring.
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8222/healthz && break
+            sleep 1
+          done
+      - name: integration tests
+        run: cargo test --workspace --test '*' -- --test-threads=1
+      - name: teardown
+        if: always()
+        run: docker compose -f deploy/compose/dev-stack.yml down -v
+
+  # -------------------- 5. SBOM --------------------
+  sbom:
+    name: sbom
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.84.0
+      - name: install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+      - name: generate SBOM (Rust)
+        run: cargo cyclonedx --all --format json --output-pattern bom
+      - name: collect SBOMs
+        run: |
+          mkdir -p sbom
+          find . -name 'bom.json' -exec cp {} sbom/ \;
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom/
+
+  # -------------------- 6. Vuln scan --------------------
+  vuln:
+    name: vuln
+    needs: sbom
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.84.0
+      - name: cargo audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit --deny warnings
+      - name: cargo deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check bans licenses sources advisories
+      - uses: actions/download-artifact@v4
+        with:
+          name: sbom
+          path: sbom
+      - name: osv-scanner
+        uses: google/osv-scanner-action/osv-scanner-action@v2
+        with:
+          scan-args: |-
+            --sbom=sbom
+
+  # -------------------- 7. Sign + attest --------------------
+  sign:
+    name: sign
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, sbom, vuln, integration]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      attestations: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: sigstore/cosign-installer@v3
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+      - name: cosign sign-blob (keyless)
+        run: |
+          shopt -s globstar
+          for f in artifacts/**/iot-*; do
+            [[ -f "$f" ]] || continue
+            cosign sign-blob --yes "$f" --bundle "$f.cosign.bundle"
+          done
+      - name: SLSA provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'artifacts/**/iot-*'
+
+  # -------------------- 8. Reproducibility --------------------
+  reproducibility:
+    name: reproducibility
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.84.0
+      - name: install diffoscope
+        run: sudo apt-get update && sudo apt-get install -y diffoscope
+      - name: first build
+        run: |
+          cargo build --workspace --release
+          mkdir -p /tmp/build1 && cp target/release/iot-* /tmp/build1/ 2>/dev/null || true
+      - name: clean
+        run: cargo clean
+      - name: second build
+        run: |
+          cargo build --workspace --release
+          mkdir -p /tmp/build2 && cp target/release/iot-* /tmp/build2/ 2>/dev/null || true
+      - name: diffoscope
+        run: |
+          for f in /tmp/build1/*; do
+            name="$(basename "$f")"
+            diffoscope --exclude-directory-metadata=yes "$f" "/tmp/build2/$name"
+          done
+
+  # -------------------- 9. Publish --------------------
+  publish:
+    name: publish
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [sign, reproducibility]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: TODO
+        run: echo "TODO: generate + sign TUF metadata, push to OCI registry, create GitHub release."

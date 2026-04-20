@@ -1,0 +1,41 @@
+# Demo plugin — echoes commands back as state.
+#
+# Exercises the manifest shape end-to-end: capability declaration, signing
+# fields, and UI contribution. Not a real integration; removed once M2 ships
+# a proper reference adapter.
+
+schema_version: 1
+id: demo-echo
+name: Demo Echo
+version: 0.1.0
+description: >
+  Republishes any command received on its namespace as an EntityState update,
+  validating the bus + plugin-host wiring end-to-end.
+authors: ["IoT-AtHome"]
+license: "Apache-2.0 OR MIT"
+
+runtime: wasm-component
+abi:
+  world: iot:plugin-host
+  version: 1.0.0
+entrypoint: plugin.wasm
+
+capabilities:
+  bus:
+    publish:
+      - "device.demo-echo.>"
+    subscribe:
+      - "cmd.demo-echo.>"
+
+resources:
+  memory_mb_max: 32
+  cpu_pct_max: 5
+  fuel_max: 1000000
+
+signatures:
+  - mechanism: cosign-keyless
+    rekor_entry: "DEV-UNSIGNED"
+    identity: "dev@localhost"
+    issuer: "dev"
+
+sbom: sbom.cdx.json

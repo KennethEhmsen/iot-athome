@@ -1,0 +1,21 @@
+[package]
+name = "iot-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "IoT-AtHome — shared domain types (device IDs, time, trust levels, capabilities)."
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ulid.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true

@@ -1,0 +1,48 @@
+# cargo-deny configuration — supply-chain gating.
+# Plan §5 / ADR-0006. Run via `cargo deny check` (wired into CI).
+
+[graph]
+all-features = false
+no-default-features = false
+
+[licenses]
+# Allow-list: anything a commercial shop can ship without legal review.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "0BSD",
+    "MPL-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+# Deny crates that are known-unmaintained or duplicative of a workspace pick.
+deny = [
+    # OpenSSL directly — rustls is our TLS stack (ADR-0002).
+    { crate = "openssl-sys" },
+    # time 0.1 — known unsoundness (RUSTSEC-2020-0071).
+    { crate = "time", version = "<0.3" },
+]
+
+[advisories]
+version = 2
+# "deny" blocks build; "warn" surfaces but does not gate. Start strict.
+ignore = []
+yanked = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
