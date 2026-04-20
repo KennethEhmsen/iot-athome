@@ -86,7 +86,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 uuid = { version = "1.11", features = ["v4", "v7", "serde"] }
 
 # --- wasm plugin host (ADR-0003) ---
-wasmtime = { version = "27", features = ["component-model", "async"] }
+wasmtime = { version = "36", features = ["component-model", "async"] }
 wasmtime-wasi = "27"
 wit-bindgen = "0.36"
 
