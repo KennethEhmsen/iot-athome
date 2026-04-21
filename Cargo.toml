@@ -128,6 +128,8 @@ use_self = "allow"                         # verbose in generated code
 cognitive_complexity = "allow"             # noisy
 branches_sharing_code = "allow"
 or_fun_call = "allow"                      # .unwrap_or_else is often fine
+result_large_err = "allow"                 # figment::Error + friends are big by design
+large_enum_variant = "allow"               # same
 
 # ADR-0008 — panics in libraries are bugs, but warn (not error) so tests
 # and the occasional #[allow] remain usable.
