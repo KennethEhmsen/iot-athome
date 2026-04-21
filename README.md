@@ -81,6 +81,7 @@ Every load-bearing choice is an ADR in [docs/adr/](docs/adr/):
 | [0008](docs/adr/0008-error-handling.md) | Error handling |
 | [0009](docs/adr/0009-logging-and-tracing.md) | Logging and tracing |
 | [0010](docs/adr/0010-config-format-and-layering.md) | Config format and layering |
+| [0011](docs/adr/0011-dev-bus-auth.md) | Dev-mode bus auth — mTLS-only, single IOT account (supersedes part of ADR-0004 in dev) |
 
 ## Milestones
 
