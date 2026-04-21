@@ -184,9 +184,12 @@ jobs:
           path: sbom/
 
   # -------------------- 6. Vuln scan --------------------
+  # cargo-deny covers license / bans / sources / advisories with one config
+  # (deny.toml). OSV-scanner on the SBOM returns in M6 once we have a stable
+  # osv-scanner GitHub action target.
   vuln:
     name: vuln
-    needs: sbom
+    needs: preflight
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -194,21 +197,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.84.0
-      # cargo-deny covers what cargo-audit does (and more) with a
-      # single config file (deny.toml). See ADR-0006.
       - name: cargo deny
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check bans licenses sources advisories
-      - uses: actions/download-artifact@v4
-        with:
-          name: sbom
-          path: sbom
-      - name: osv-scanner
-        uses: google/osv-scanner-action/osv-scanner-action@v2
-        with:
-          scan-args: |-
-            --sbom=sbom
 
   # -------------------- 7. Sign + attest --------------------
   sign:
