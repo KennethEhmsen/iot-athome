@@ -8,8 +8,8 @@
 # to the production signing hierarchy described in ADR-0006. Do not ship
 # them. Do not copy them anywhere. The `.gitignore` excludes generated output.
 #
-# Requirements: openssl >= 1.1.1 (or `step-cli`). This script uses openssl
-# because it's universally available; a step-cli variant is welcome later.
+# Requirements: openssl >= 1.1.1. This script uses openssl because it's
+# universally available; a step-cli variant is welcome later.
 
 set -euo pipefail
 
@@ -24,13 +24,31 @@ log() { printf '\e[1;36m[devcerts]\e[0m %s\n' "$*"; }
 
 # ---------- Root CA ----------
 
+ca_cnf="${CA_DIR}/ca.cnf"
+cat > "${ca_cnf}" <<'EOF'
+[req]
+distinguished_name = req_dn
+x509_extensions    = v3_ca
+prompt             = no
+
+[req_dn]
+C  = XX
+O  = IoT-AtHome-Dev
+CN = IoT-AtHome Dev Root CA
+
+[v3_ca]
+basicConstraints = critical, CA:true
+keyUsage         = critical, digitalSignature, cRLSign, keyCertSign
+subjectKeyIdentifier = hash
+EOF
+
 if [[ ! -f "${CA_DIR}/ca.crt" ]]; then
   log "Creating local dev CA"
-  openssl genrsa -out "${CA_DIR}/ca.key" 4096 2>/dev/null
+  openssl genrsa -out "${CA_DIR}/ca.key" 4096
   openssl req -x509 -new -nodes \
     -key "${CA_DIR}/ca.key" \
     -sha256 -days 1825 \
-    -subj "/C=XX/O=IoT-AtHome-Dev/CN=IoT-AtHome Dev Root CA" \
+    -config "${ca_cnf}" \
     -out "${CA_DIR}/ca.crt"
   chmod 600 "${CA_DIR}/ca.key"
 else
@@ -60,41 +78,40 @@ mint_component() {
 
   log "  ${name}: generating"
 
-  cat > "${cnf}" <<EOF
-[req]
-distinguished_name = req_dn
-req_extensions     = v3_req
-prompt             = no
+  {
+    echo "[req]"
+    echo "distinguished_name = req_dn"
+    echo "req_extensions     = v3_req"
+    echo "prompt             = no"
+    echo
+    echo "[req_dn]"
+    echo "C  = XX"
+    echo "O  = IoT-AtHome-Dev"
+    echo "CN = ${cn}"
+    echo
+    echo "[v3_req]"
+    echo "keyUsage         = critical, digitalSignature, keyEncipherment"
+    echo "extendedKeyUsage = serverAuth, clientAuth"
+    echo "subjectAltName   = @alt_names"
+    echo
+    echo "[alt_names]"
+    local i=1
+    for san in "${sans[@]}"; do
+      if [[ "${san}" == IP:* ]]; then
+        echo "IP.${i} = ${san#IP:}"
+      else
+        echo "DNS.${i} = ${san#DNS:}"
+      fi
+      i=$((i+1))
+    done
+  } > "${cnf}"
 
-[req_dn]
-C  = XX
-O  = IoT-AtHome-Dev
-CN = ${cn}
-
-[v3_req]
-keyUsage         = critical, digitalSignature, keyEncipherment
-extendedKeyUsage = serverAuth, clientAuth
-subjectAltName   = @alt_names
-
-[alt_names]
-EOF
-
-  local i=1
-  for san in "${sans[@]}"; do
-    if [[ "${san}" == IP:* ]]; then
-      echo "IP.${i} = ${san#IP:}" >> "${cnf}"
-    else
-      echo "DNS.${i} = ${san}" >> "${cnf}"
-    fi
-    i=$((i+1))
-  done
-
-  openssl genrsa -out "${key}" 2048 2>/dev/null
+  openssl genrsa -out "${key}" 2048
   openssl req -new -key "${key}" -out "${csr}" -config "${cnf}"
   openssl x509 -req -in "${csr}" \
     -CA "${CA_DIR}/ca.crt" -CAkey "${CA_DIR}/ca.key" -CAcreateserial \
     -out "${crt}" -days "${DAYS}" -sha256 \
-    -extensions v3_req -extfile "${cnf}" 2>/dev/null
+    -extensions v3_req -extfile "${cnf}"
   chmod 600 "${key}"
 }
 
