@@ -29,7 +29,7 @@ impl Default for Config {
 }
 
 fn default_listen() -> SocketAddr {
-    "127.0.0.1:8081".parse().expect("static addr")
+    SocketAddr::from(([127, 0, 0, 1], 8081))
 }
 
 pub async fn run(cfg: Config) -> Result<()> {

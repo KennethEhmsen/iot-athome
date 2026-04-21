@@ -54,7 +54,7 @@ impl Default for Config {
 }
 
 fn default_listen() -> SocketAddr {
-    "127.0.0.1:50051".parse().expect("static addr")
+    SocketAddr::from(([127, 0, 0, 1], 50051))
 }
 
 fn default_db() -> String {

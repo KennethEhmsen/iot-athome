@@ -33,6 +33,10 @@ impl DeviceRepo {
         Self { pool }
     }
 
+    /// Upsert is long because it replaces the entire child-row set for rooms,
+    /// capabilities, and entities. Splitting would obscure the transaction
+    /// boundary; the allow stays scoped to this fn.
+    #[allow(clippy::too_many_lines)]
     #[instrument(skip(self, device), fields(device.id = %device_id(&device)))]
     pub async fn upsert(&self, mut device: Device) -> Result<Device> {
         if device_id(&device).is_empty() {
@@ -283,10 +287,9 @@ fn entity_id(e: &Entity) -> String {
 
 fn rw_str(rw: i32) -> &'static str {
     match ReadWrite::try_from(rw).unwrap_or(ReadWrite::Unspecified) {
-        ReadWrite::Read => "read",
         ReadWrite::Write => "write",
         ReadWrite::ReadWrite => "read_write",
-        ReadWrite::Unspecified => "read",
+        ReadWrite::Read | ReadWrite::Unspecified => "read",
     }
 }
 
@@ -294,7 +297,7 @@ fn rw_from_str(s: &str) -> ReadWrite {
     match s {
         "write" => ReadWrite::Write,
         "read_write" => ReadWrite::ReadWrite,
-        "read" | _ => ReadWrite::Read,
+        _ => ReadWrite::Read,
     }
 }
 
@@ -319,9 +322,10 @@ fn row_to_device(row: &sqlx::sqlite::SqliteRow) -> Result<Device> {
     let last_seen_s: String = row.try_get("last_seen")?;
     let plugin_meta_json: String = row.try_get("plugin_meta_json")?;
     let plugin_meta: BTreeMap<String, String> = serde_json::from_str(&plugin_meta_json)?;
-    let last_seen: DateTime<Utc> = DateTime::parse_from_rfc3339(&last_seen_s)
-        .map(|d| d.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now());
+    let last_seen: DateTime<Utc> = match DateTime::parse_from_rfc3339(&last_seen_s) {
+        Ok(d) => d.with_timezone(&Utc),
+        Err(_) => Utc::now(),
+    };
 
     Ok(Device {
         id: Some(iot_proto::iot::common::v1::Ulid { value: id_s }),
@@ -335,7 +339,7 @@ fn row_to_device(row: &sqlx::sqlite::SqliteRow) -> Result<Device> {
         plugin_meta: plugin_meta.into_iter().collect(),
         last_seen: Some(prost_types::Timestamp {
             seconds: last_seen.timestamp(),
-            nanos: last_seen.timestamp_subsec_nanos() as i32,
+            nanos: i32::try_from(last_seen.timestamp_subsec_nanos()).unwrap_or(0),
         }),
         capabilities: Vec::new(),
         entities: Vec::new(),
