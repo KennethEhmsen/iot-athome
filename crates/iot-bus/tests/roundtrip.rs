@@ -62,18 +62,10 @@ async fn header_envelope_roundtrips() -> Result<(), Box<dyn std::error::Error>> 
     assert_eq!(msg.payload.as_ref(), b"hello");
 
     let got_headers = msg.headers.as_ref().expect("headers present");
-    assert_eq!(
-        got_headers.get(IOT_PUBLISHER).map(|v| v.as_str()),
-        Some("integration-test")
-    );
-    assert_eq!(
-        got_headers.get(IOT_SCHEMA_VERSION).map(|v| v.as_str()),
-        Some("1")
-    );
-    assert_eq!(
-        got_headers.get(IOT_TYPE).map(|v| v.as_str()),
-        Some("iot.device.v1.EntityEvent")
-    );
+    let as_string = |k: &str| got_headers.get(k).map(ToString::to_string);
+    assert_eq!(as_string(IOT_PUBLISHER), Some("integration-test".into()));
+    assert_eq!(as_string(IOT_SCHEMA_VERSION), Some("1".into()));
+    assert_eq!(as_string(IOT_TYPE), Some("iot.device.v1.EntityEvent".into()));
 
     Ok(())
 }

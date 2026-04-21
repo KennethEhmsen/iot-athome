@@ -119,7 +119,7 @@ impl Bus {
         headers.insert(IOT_TYPE, iot_type);
         headers.insert(CONTENT_TYPE, CONTENT_TYPE_PROTOBUF);
 
-        if !headers.iter().any(|(k, _)| k.as_str() == TRACEPARENT) {
+        if headers.get(TRACEPARENT).is_none() {
             if let Some(tp) = current_traceparent() {
                 headers.insert(TRACEPARENT, tp.as_str());
             }
