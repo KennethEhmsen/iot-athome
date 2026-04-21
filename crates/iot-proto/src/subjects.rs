@@ -80,6 +80,7 @@ pub fn audit(kind: &str) -> Result<String, SubjectError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
