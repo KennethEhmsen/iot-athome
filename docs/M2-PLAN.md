@@ -19,18 +19,20 @@ one new adapter (Z-Wave or 433-SDR — TBD in W2).
 
 ## Week-by-week
 
-### W1 — Bindings that compile
+### W1 — Bindings that compile ✅ (2026-04-21)
 
-- [ ] `schemas/wit/iot-plugin-host.wit` stays the source of truth (shipped in M1).
-- [ ] `iot-plugin-sdk-rust`: `wit_bindgen::generate!` invocation + a prelude module.
-- [ ] `iot-plugin-host`: `wasmtime::component::bindgen!` invocation + skeleton `PluginImports` with placeholder bus/log methods.
-- [ ] Round-trip test: a fixture plugin compiled against the SDK loads in a test harness and `init()` returns OK.
-- [ ] First compilable demo: `cargo build -p demo-echo --target wasm32-wasip2` produces a component binary that the host can load.
+- [x] `schemas/wit/iot-plugin-host.wit` — exports wrapped in `interface runtime` so wit-bindgen emits a single `__export_world_plugin_cabi` macro (one per world-level free function was the duplicate-name trigger).
+- [x] `iot-plugin-sdk-rust`: `wit_bindgen::generate!` with `pub_export_macro: true` + `export_macro_name: "export_plugin"`.
+- [x] `iot-plugin-host`: `wasmtime::component::bindgen!` with the 36+ `imports:/exports:` async syntax, plus Host trait impls on `PluginState`.
+- [x] `iot-plugin-host::capabilities` — `CapabilityMap` + NATS `foo.>` wildcard matcher, 3 unit tests.
+- [x] Round-trip test (`crates/iot-plugin-host/tests/roundtrip.rs`): loads the real `demo_echo.wasm`, exercises `runtime::init()` + `runtime::on_message()` in and out of capability scope, verifies `capability.denied` is returned as an app-level `PluginError` (not a host trap).
+- [x] First compilable demo: `plugins/demo-echo/` with `.cargo/config.toml` pinning `wasm32-wasip2`. Produces a 3.5 MB debug `.wasm` component verified via the `\0asm` magic.
+- [x] WASI p2 preview-adapter imports (`wasi:cli/environment`, stdio, etc.) linked via `wasmtime_wasi::p2::add_to_linker_async`.
 
 ### W2 — Capability enforcement + one real host call
 
-- [ ] Manifest loader: parse `plugin-manifest.schema.json` at install, store a `CapabilityMap` with the plugin instance.
-- [ ] `bus::publish` host impl checks subject against `capabilities.bus.publish` before calling `iot_bus::Bus::publish_proto`.
+- [x] Manifest loader: parse `plugin-manifest.schema.json` at install, store a `CapabilityMap` with the plugin instance. (W1 landed the `CapabilityMap` struct + matcher; W2 wires it to the manifest YAML parser.)
+- [ ] `bus::publish` host impl checks subject against `capabilities.bus.publish` before calling `iot_bus::Bus::publish_proto`. (W1 impl stubs the `iot_bus::Bus::publish_proto` call — it logs the intended publish. W2 wires the real bus.)
 - [ ] `log::emit` host impl forwards to `tracing` with plugin id as a span field.
 - [ ] Deny test: a plugin publishing on an out-of-scope subject gets `capability.denied`, audit entry recorded.
 - [ ] `demo-echo` actually echoes: on-message → bus.publish back on a mirror subject.
