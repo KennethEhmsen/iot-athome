@@ -90,7 +90,10 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let result = match &cli.command {
-        Command::Version => cmd_version(),
+        Command::Version => {
+            cmd_version();
+            Ok(())
+        }
         Command::Ping => cmd_ping().await,
         Command::Device(sub) => cmd_device(&cli.registry, sub).await,
     };
@@ -99,10 +102,9 @@ async fn main() -> Result<()> {
     result
 }
 
-fn cmd_version() -> Result<()> {
+fn cmd_version() {
     println!("iotctl {}", env!("CARGO_PKG_VERSION"));
     println!("device schema v{}", iot_core::DEVICE_SCHEMA_VERSION);
-    Ok(())
 }
 
 async fn cmd_ping() -> Result<()> {
@@ -175,7 +177,7 @@ async fn cmd_device(registry_url: &str, sub: &DeviceCmd) -> Result<()> {
                 entities: Vec::new(),
                 trust_level: TrustLevel::UserAdded.into(),
                 schema_version: iot_core::DEVICE_SCHEMA_VERSION,
-                plugin_meta: Default::default(),
+                plugin_meta: std::collections::HashMap::default(),
                 last_seen: None,
             };
             let resp = client
@@ -186,7 +188,7 @@ async fn cmd_device(registry_url: &str, sub: &DeviceCmd) -> Result<()> {
                 .await?
                 .into_inner();
             if let Some(d) = &resp.device {
-                let id = d.id.as_ref().map(|u| u.value.as_str()).unwrap_or("");
+                let id = d.id.as_ref().map_or("", |u| u.value.as_str());
                 let verb = if resp.created { "created" } else { "updated" };
                 println!("{verb} {id} ({})", d.integration);
             }
@@ -202,7 +204,7 @@ async fn cmd_device(registry_url: &str, sub: &DeviceCmd) -> Result<()> {
             let mut n = 0usize;
             while let Some(msg) = stream.message().await? {
                 if let Some(d) = msg.device {
-                    let id = d.id.as_ref().map(|u| u.value.as_str()).unwrap_or("");
+                    let id = d.id.as_ref().map_or("", |u| u.value.as_str());
                     println!("{id:<28} {:<12} {}", d.integration, label_or(&d));
                     n += 1;
                 }
@@ -251,7 +253,7 @@ fn label_or(d: &Device) -> &str {
 }
 
 fn to_json(d: &Device) -> serde_json::Value {
-    let id = d.id.as_ref().map(|u| u.value.as_str()).unwrap_or("");
+    let id = d.id.as_ref().map_or("", |u| u.value.as_str());
     serde_json::json!({
         "id": id,
         "integration": d.integration,
