@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "IoT-AtHome — tracing + OpenTelemetry bootstrap (ADR-0009)."
+description = "IoT-AtHome — tracing bootstrap (ADR-0009)."
 
 [lints]
 workspace = true
@@ -13,9 +13,4 @@ workspace = true
 [dependencies]
 tracing.workspace = true
 tracing-subscriber.workspace = true
-tracing-opentelemetry.workspace = true
-opentelemetry.workspace = true
-opentelemetry_sdk.workspace = true
-opentelemetry-otlp.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "macros"] }
