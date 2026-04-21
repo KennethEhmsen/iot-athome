@@ -11,6 +11,9 @@ description = "IoT-AtHome — HTTP + WebSocket gateway in front of Envoy (ADR-00
 [lints]
 workspace = true
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "iot-gateway"
 path = "src/main.rs"
@@ -23,10 +26,18 @@ iot-config = { path = "../iot-config" }
 iot-observability = { path = "../iot-observability" }
 
 anyhow.workspace = true
+async-nats.workspace = true
 axum.workspace = true
+base64 = "0.22"
+chrono.workspace = true
+futures.workspace = true
+prost.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "net"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "net", "sync"] }
+tokio-stream.workspace = true
+tonic.workspace = true
 tower.workspace = true
 tower-http.workspace = true
 tracing.workspace = true

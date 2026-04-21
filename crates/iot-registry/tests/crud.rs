@@ -18,6 +18,7 @@ use iot_proto::iot::registry::v1::{
 use tonic::transport::Endpoint;
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn upsert_list_get_delete() -> Result<(), Box<dyn std::error::Error>> {
     // Pick a free port by briefly binding.
     let port = {
@@ -111,7 +112,32 @@ async fn upsert_list_get_delete() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(got.external_id, "ABC-123");
     assert_eq!(got.label, "test");
 
-    // 4. Delete.
+    // 4. Upsert-as-update. Same ULID, different label, `created=false`
+    //    confirms the update branch fired.
+    let updated = client
+        .upsert_device(UpsertDeviceRequest {
+            device: Some(Device {
+                id: Some(PbUlid { value: id.clone() }),
+                integration: "demo-echo".into(),
+                external_id: "ABC-123".into(),
+                label: "test-renamed".into(),
+                schema_version: 1,
+                ..Default::default()
+            }),
+            idempotency_key: String::new(),
+        })
+        .await?
+        .into_inner();
+    assert!(
+        !updated.created,
+        "second upsert should report created=false"
+    );
+    assert_eq!(
+        updated.device.as_ref().expect("device present").label,
+        "test-renamed"
+    );
+
+    // 5. Delete.
     let del = client
         .delete_device(DeleteDeviceRequest {
             id: Some(PbUlid { value: id.clone() }),
@@ -120,9 +146,22 @@ async fn upsert_list_get_delete() -> Result<(), Box<dyn std::error::Error>> {
         .into_inner();
     assert!(del.deleted);
 
-    // 5. Verify audit log chain.
+    // 6. Audit log: chain verified, and the full lifecycle is recorded.
     let audit = iot_audit::AuditLog::open(&tmp_audit).await?;
     audit.verify().await?;
+    let kinds: Vec<String> = std::fs::read_to_string(&tmp_audit)?
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).expect("valid json");
+            v["kind"].as_str().unwrap_or("").to_owned()
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["device.created", "device.updated", "device.deleted"],
+        "audit log should record the full lifecycle in order"
+    );
 
     server_task.abort();
     std::fs::remove_file(&tmp_audit).ok();
