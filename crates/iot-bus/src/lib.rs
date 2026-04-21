@@ -16,6 +16,7 @@ use async_nats::HeaderMap;
 use iot_proto::headers::{
     CONTENT_TYPE, CONTENT_TYPE_PROTOBUF, IOT_PUBLISHER, IOT_SCHEMA_VERSION, IOT_TYPE, TRACEPARENT,
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::instrument;
 
@@ -31,7 +32,7 @@ pub enum BusError {
 }
 
 /// Connection configuration. mTLS is mandatory.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// NATS URL, e.g. `tls://nats.iot.local:4222`.
     pub url: String,
