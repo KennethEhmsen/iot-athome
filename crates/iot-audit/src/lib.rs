@@ -153,8 +153,8 @@ impl AuditLog {
             if entry.prev != expected_prev {
                 return Err(AuditError::ChainBroken {
                     seq: entry.seq,
-                    expected: expected_prev.clone(),
-                    actual: entry.prev.clone(),
+                    expected: expected_prev,
+                    actual: entry.prev,
                 });
             }
             expected_prev = entry.hash;
