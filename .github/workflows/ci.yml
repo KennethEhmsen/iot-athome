@@ -145,7 +145,8 @@ jobs:
           toolchain: 1.84.0
       - name: bring up dev infra
         run: |
-          ./tools/devcerts/mint.sh
+          # `git on windows` drops the executable bit; run via bash explicitly.
+          bash ./tools/devcerts/mint.sh
           docker compose -f deploy/compose/dev-stack.yml up -d nats mosquitto
           # Wait for readiness. NATS 8222 is plaintext monitoring.
           for i in $(seq 1 30); do
@@ -172,7 +173,7 @@ jobs:
       - name: install cargo-cyclonedx
         run: cargo install cargo-cyclonedx --locked
       - name: generate SBOM (Rust)
-        run: cargo cyclonedx --all --format json --output-pattern bom
+        run: cargo cyclonedx --all --format json
       - name: collect SBOMs
         run: |
           mkdir -p sbom
