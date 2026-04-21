@@ -65,7 +65,10 @@ async fn header_envelope_roundtrips() -> Result<(), Box<dyn std::error::Error>> 
     let as_string = |k: &str| got_headers.get(k).map(ToString::to_string);
     assert_eq!(as_string(IOT_PUBLISHER), Some("integration-test".into()));
     assert_eq!(as_string(IOT_SCHEMA_VERSION), Some("1".into()));
-    assert_eq!(as_string(IOT_TYPE), Some("iot.device.v1.EntityEvent".into()));
+    assert_eq!(
+        as_string(IOT_TYPE),
+        Some("iot.device.v1.EntityEvent".into())
+    );
 
     Ok(())
 }
