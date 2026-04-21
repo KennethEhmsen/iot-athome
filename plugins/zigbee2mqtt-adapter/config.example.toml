@@ -1,0 +1,10 @@
+# zigbee2mqtt-adapter — example configuration.
+
+config_version = 1
+
+mqtt_host     = "127.0.0.1:8884"
+mqtt_ca       = "./tools/devcerts/generated/ca/ca.crt"
+mqtt_cert     = "./tools/devcerts/generated/zigbee-adapter/zigbee-adapter.crt"
+mqtt_key      = "./tools/devcerts/generated/zigbee-adapter/zigbee-adapter.key"
+subscribe     = "zigbee2mqtt/+"
+registry_url  = "http://127.0.0.1:50051"

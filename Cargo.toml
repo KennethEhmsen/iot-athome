@@ -13,9 +13,11 @@ members = [
   "crates/iot-observability",
   "crates/iot-config",
   "crates/iot-cli",
+  # M1-era adapters live under plugins/ but run as regular systemd services.
+  # They'll migrate to WASM components in M2 without changing their manifests.
+  "plugins/zigbee2mqtt-adapter",
 ]
 exclude = [
-  "plugins/*",
   "firmware/*",
   "services/ml",
   "panel",
@@ -71,6 +73,10 @@ hyper = "1.5"
 
 # --- bus ---
 async-nats = "0.47"
+
+# --- mqtt ---
+# use-rustls: mandatory. OpenSSL is banned by ADR-0006 / deny.toml.
+rumqttc = { version = "0.24", default-features = false, features = ["use-rustls"] }
 
 # --- storage ---
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "macros", "sqlite", "postgres", "migrate", "chrono", "uuid"] }

@@ -121,15 +121,20 @@ mint_component() {
 
 log "Minting component certs"
 
-mint_component nats      "nats.iot.local"      DNS:nats.iot.local      DNS:localhost IP:127.0.0.1
-mint_component mosquitto "mosquitto.iot.local" DNS:mosquitto.iot.local DNS:localhost IP:127.0.0.1
-mint_component gateway   "gateway.iot.local"   DNS:gateway.iot.local   DNS:localhost IP:127.0.0.1
-mint_component registry  "registry.iot.local"  DNS:registry.iot.local  DNS:localhost IP:127.0.0.1
-mint_component envoy     "envoy.iot.local"     DNS:envoy.iot.local     DNS:localhost IP:127.0.0.1
-mint_component panel     "panel.iot.local"     DNS:panel.iot.local     DNS:localhost IP:127.0.0.1
+mint_component nats           "nats.iot.local"      DNS:nats.iot.local      DNS:localhost IP:127.0.0.1
+mint_component mosquitto      "mosquitto.iot.local" DNS:mosquitto.iot.local DNS:localhost IP:127.0.0.1
+mint_component gateway        "gateway.iot.local"   DNS:gateway.iot.local   DNS:localhost IP:127.0.0.1
+mint_component registry       "registry.iot.local"  DNS:registry.iot.local  DNS:localhost IP:127.0.0.1
+mint_component envoy          "envoy.iot.local"     DNS:envoy.iot.local     DNS:localhost IP:127.0.0.1
+mint_component panel          "panel.iot.local"     DNS:panel.iot.local     DNS:localhost IP:127.0.0.1
+
+# Adapter identities — one per plugin. Mosquitto's mTLS listener reads the
+# CN as the MQTT username (via use_identity_as_username true), so each
+# adapter has its own cert.
+mint_component zigbee-adapter "zigbee-adapter"      DNS:zigbee-adapter      DNS:localhost
 
 # Client cert used by `iotctl` and by the panel's device identity during dev.
-mint_component client    "dev-client"          DNS:dev-client          DNS:localhost
+mint_component client         "dev-client"          DNS:dev-client          DNS:localhost
 
 log "Done. Certs in ${OUT}/"
 log "Add '${OUT}/ca/ca.crt' to your OS trust store for a friction-free dev loop."
