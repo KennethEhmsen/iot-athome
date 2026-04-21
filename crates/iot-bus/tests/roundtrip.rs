@@ -9,6 +9,8 @@
 //! Run locally with `cargo test -p iot-bus --test roundtrip -- --nocapture`.
 //! Requires Docker / Podman / Testcontainers-compatible runtime.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use futures::StreamExt as _;
 use iot_proto::headers::{IOT_PUBLISHER, IOT_SCHEMA_VERSION, IOT_TYPE};
 use std::time::Duration;

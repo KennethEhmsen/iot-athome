@@ -4,6 +4,8 @@
 //! drives it with a tonic client, and verifies upsert → list → get → delete.
 //! The audit log is written to a temp file; at the end we verify the chain.
 
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
 use std::net::TcpListener;
 use std::path::PathBuf;
 
