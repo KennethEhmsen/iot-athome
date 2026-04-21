@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "IoT-AtHome — shared domain types (device IDs, time, trust levels, capabilities)."
 
 [lints]

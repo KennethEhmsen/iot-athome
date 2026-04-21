@@ -28,6 +28,10 @@ rust-version = "1.88"
 authors = ["IoT-AtHome"]
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/iot-athome/iot-athome"
+# Workspace-internal crates aren't published to crates.io; each crate inherits
+# this flag via `publish.workspace = true`. cargo-deny treats path deps on
+# unpublished crates as valid (vs public-crate wildcards, which it denies).
+publish = false
 
 [workspace.dependencies]
 # --- async runtime (ADR-0002) ---
@@ -66,7 +70,7 @@ tower-http = { version = "0.6", features = ["trace", "cors"] }
 hyper = "1.5"
 
 # --- bus ---
-async-nats = "0.38"
+async-nats = "0.47"
 
 # --- storage ---
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "macros", "sqlite", "postgres", "migrate", "chrono", "uuid"] }
@@ -86,8 +90,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 uuid = { version = "1.11", features = ["v4", "v7", "serde"] }
 
 # --- wasm plugin host (ADR-0003) ---
-wasmtime = { version = "27", features = ["component-model", "async"] }
-wasmtime-wasi = "27"
+# 36+ required: RUSTSEC-2025-0046, -2025-0118, -2026-0020, -2026-0021,
+# -2026-0085, -2026-0086, -2026-0087. Pinning exact per ADR-0003.
+wasmtime = { version = "36.0.7", features = ["component-model", "async"] }
+wasmtime-wasi = "36.0.7"
 wit-bindgen = "0.36"
 
 # --- cli ---

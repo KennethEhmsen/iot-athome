@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "IoT-AtHome — NATS JetStream client wrapper with mTLS and trace-propagation defaults."
 
 [lints]

@@ -13,6 +13,27 @@ set dotenv-load := false
 default:
     @just --list --unsorted
 
+# Run every check CI runs, locally, in the right order. Use this before
+# `git push` to avoid round-tripping through CI.
+ci-local: ci-preflight ci-build ci-test ci-audit
+
+ci-preflight: lint-typos lint-fmt lint-schemas lint-rust lint-panel
+
+ci-build:
+    cargo build --workspace --all-targets
+
+ci-test:
+    cargo nextest run --workspace --all-targets
+
+ci-audit:
+    cargo deny check
+
+lint-typos:
+    typos .
+
+lint-fmt:
+    cargo fmt --all -- --check
+
 # --- dev loop ---
 
 # Spin up the full local infrastructure stack (NATS, Mosquitto, Keycloak, Envoy, Tempo/Loki/Prometheus).

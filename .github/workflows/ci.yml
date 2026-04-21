@@ -193,10 +193,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.84.0
-      - name: cargo audit
-        run: |
-          cargo install cargo-audit --locked
-          cargo audit --deny warnings
+      # cargo-deny covers what cargo-audit does (and more) with a
+      # single config file (deny.toml). See ADR-0006.
       - name: cargo deny
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
