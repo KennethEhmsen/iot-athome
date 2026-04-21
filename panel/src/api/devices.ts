@@ -12,8 +12,13 @@ export interface Device {
   last_seen: string;
 }
 
+interface ListDevicesResponse {
+  devices: Device[];
+}
+
 export async function listDevices(): Promise<Device[]> {
-  return request<Device[]>("/devices");
+  const r = await request<ListDevicesResponse>("/devices");
+  return r.devices;
 }
 
 export async function getDevice(id: string): Promise<Device> {

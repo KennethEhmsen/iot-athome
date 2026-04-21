@@ -1,13 +1,12 @@
 //! WebSocket stream — pipes selected NATS subjects to the client as JSON.
 //!
-//! `GET /stream?topics=device.>` subscribes to the matching NATS subject tree
-//! and emits one JSON line per message:
+//! `GET /stream?topics=device.>` subscribes to the matching NATS subject tree.
+//! Each NATS message is rewrapped as JSON so the panel doesn't need a
+//! protobuf runtime:
 //!
-//! ```json
-//! { "subject": "device.zigbee.<id>.temp.state",
-//!   "iot_type": "iot.device.v1.EntityState",
-//!   "payload_b64": "CgMBAgM..." }
-//! ```
+//! * For `iot.device.v1.EntityState` we decode the protobuf and expose the
+//!   value as native JSON (`value` field) + the device/entity ULIDs.
+//! * Anything else falls through as `payload_b64` for the curious.
 //!
 //! W3a: no auth; W3b layers OIDC bearer validation on top.
 
@@ -16,6 +15,8 @@ use axum::extract::{Query, State};
 use axum::response::IntoResponse;
 use base64::prelude::*;
 use futures::StreamExt as _;
+use iot_proto::iot::device::v1::EntityState;
+use prost::Message as _;
 use serde::Deserialize;
 use tracing::{debug, info, warn};
 
@@ -82,11 +83,7 @@ async fn handle_socket(mut socket: WebSocket, topics: String, state: AppState) {
                     .as_ref()
                     .and_then(|h| h.get("iot-type"))
                     .map_or_else(String::new, ToString::to_string);
-                let event = serde_json::json!({
-                    "subject": msg.subject.as_str(),
-                    "iot_type": iot_type,
-                    "payload_b64": BASE64_STANDARD.encode(&msg.payload),
-                });
+                let event = shape_event(msg.subject.as_str(), &iot_type, &msg.payload);
                 if send_text(&mut socket, event.to_string()).await.is_err() {
                     debug!("client dropped");
                     break;
@@ -104,4 +101,57 @@ async fn handle_socket(mut socket: WebSocket, topics: String, state: AppState) {
         }
     }
     info!("ws client disconnected");
+}
+
+/// Rewrap a bus message into the panel-facing JSON shape.
+fn shape_event(subject: &str, iot_type: &str, payload: &[u8]) -> serde_json::Value {
+    if iot_type == "iot.device.v1.EntityState" {
+        if let Ok(state) = EntityState::decode(payload) {
+            return serde_json::json!({
+                "subject": subject,
+                "iot_type": iot_type,
+                "device_id": state.device_id.as_ref().map(|u| u.value.clone()),
+                "entity_id": state.entity_id.as_ref().map(|u| u.value.clone()),
+                "value": prost_to_json(state.value),
+                "at": state.at.map(|ts| {
+                    chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, u32::try_from(ts.nanos).unwrap_or(0))
+                        .map(|d| d.to_rfc3339())
+                        .unwrap_or_default()
+                }),
+            });
+        }
+    }
+    serde_json::json!({
+        "subject": subject,
+        "iot_type": iot_type,
+        "payload_b64": BASE64_STANDARD.encode(payload),
+    })
+}
+
+/// Convert a `google.protobuf.Value` (wrapped by prost-types) to
+/// `serde_json::Value`. Unknown or malformed values become `null`.
+fn prost_to_json(v: Option<prost_types::Value>) -> serde_json::Value {
+    use prost_types::value::Kind;
+    let Some(v) = v else {
+        return serde_json::Value::Null;
+    };
+    match v.kind {
+        None | Some(Kind::NullValue(_)) => serde_json::Value::Null,
+        Some(Kind::BoolValue(b)) => serde_json::Value::Bool(b),
+        Some(Kind::NumberValue(n)) => serde_json::Number::from_f64(n)
+            .map_or(serde_json::Value::Null, serde_json::Value::Number),
+        Some(Kind::StringValue(s)) => serde_json::Value::String(s),
+        Some(Kind::StructValue(s)) => serde_json::Value::Object(
+            s.fields
+                .into_iter()
+                .map(|(k, v)| (k, prost_to_json(Some(v))))
+                .collect(),
+        ),
+        Some(Kind::ListValue(l)) => serde_json::Value::Array(
+            l.values
+                .into_iter()
+                .map(|v| prost_to_json(Some(v)))
+                .collect(),
+        ),
+    }
 }

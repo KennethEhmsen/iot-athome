@@ -1,4 +1,5 @@
 import { NavLink, Route, Routes } from "react-router-dom";
+import { ErrorBoundary } from "./ErrorBoundary";
 import Devices from "./pages/Devices";
 import Home from "./pages/Home";
 
@@ -18,10 +19,12 @@ export default function App() {
         <Status />
       </header>
       <main className="flex-1 p-6 max-w-6xl w-full mx-auto">
-        <Routes>
-          <Route path="/" element={<Home />} />
-          <Route path="/devices" element={<Devices />} />
-        </Routes>
+        <ErrorBoundary>
+          <Routes>
+            <Route path="/" element={<Home />} />
+            <Route path="/devices" element={<Devices />} />
+          </Routes>
+        </ErrorBoundary>
       </main>
       <footer className="border-t border-white/10 px-6 py-3 text-xs text-white/40">
         W1 skeleton &mdash; design locked, endpoints land in W3.

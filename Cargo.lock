@@ -1914,6 +1914,7 @@ dependencies = [
  "iot-observability",
  "iot-proto",
  "prost",
+ "prost-types",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -5777,11 +5778,15 @@ name = "zigbee2mqtt-adapter"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "futures",
+ "iot-bus",
  "iot-config",
  "iot-core",
  "iot-observability",
  "iot-proto",
+ "prost",
+ "prost-types",
  "rumqttc",
  "serde",
  "serde_json",

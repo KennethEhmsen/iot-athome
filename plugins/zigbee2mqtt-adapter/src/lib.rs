@@ -1,13 +1,15 @@
 //! zigbee2mqtt -> canonical bridge.
 //!
 //! Subscribes to `zigbee2mqtt/+` on the local MQTT broker (mTLS), translates
-//! each payload into a canonical Device via [`translator`], and upserts into
-//! the registry via gRPC. The registry emits bus events on state change, so
-//! downstream consumers (panel, automation, ML) pick up the update without
-//! the adapter ever publishing on NATS directly.
+//! each payload into a canonical Device via [`translator`], upserts it into
+//! the registry via gRPC (registry handles audit + device-level state bus
+//! events), and publishes one `iot.device.v1.EntityState` event per known
+//! entity on `device.zigbee2mqtt.<id>.<key>.state` so live consumers (panel,
+//! automation) can render per-value updates.
 
 #![forbid(unsafe_code)]
 
+pub mod state_publisher;
 pub mod translator;
 
 use std::collections::HashMap;
@@ -16,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
+use iot_bus::Bus;
 use iot_proto::iot::common::v1::Ulid as PbUlid;
 use iot_proto::iot::registry::v1::registry_service_client::RegistryServiceClient;
 use iot_proto::iot::registry::v1::{ListDevicesRequest, UpsertDeviceRequest};
@@ -51,6 +54,12 @@ pub struct Config {
     /// arrives with W3c's service-to-service cert rotation story.
     #[serde(default = "default_registry_url")]
     pub registry_url: String,
+
+    /// Optional NATS bus connection. When present, each recognized entity
+    /// value is published on `device.zigbee2mqtt.<id>.<key>.state` as an
+    /// `iot.device.v1.EntityState` message for live consumers.
+    #[serde(default)]
+    pub bus: Option<iot_bus::Config>,
 }
 
 impl Default for Config {
@@ -62,6 +71,7 @@ impl Default for Config {
             mqtt_key: default_client_key(),
             subscribe: default_subscribe(),
             registry_url: default_registry_url(),
+            bus: None,
         }
     }
 }
@@ -103,6 +113,21 @@ pub async fn run(cfg: Config) -> Result<()> {
     let id_cache = Arc::new(Mutex::new(HashMap::new()));
     warm_cache(&mut client.clone(), &id_cache).await?;
 
+    let bus = if let Some(bus_cfg) = cfg.bus.clone() {
+        match Bus::connect(bus_cfg).await {
+            Ok(b) => {
+                info!("connected to bus");
+                Some(b)
+            }
+            Err(e) => {
+                warn!(error = %e, "bus connect failed — EntityState events will not be published");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let mqtt = connect_mqtt(&cfg)?;
     let (mqtt_client, mut eventloop) = mqtt;
     mqtt_client
@@ -119,8 +144,9 @@ pub async fn run(cfg: Config) -> Result<()> {
                     let payload = p.payload.to_vec();
                     let client = client.clone();
                     let cache = id_cache.clone();
+                    let bus = bus.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_message(&topic, &payload, client, cache).await {
+                        if let Err(e) = handle_message(&topic, &payload, client, cache, bus.as_ref()).await {
                             warn!(topic = %topic, error = %e, "message handling failed");
                         }
                     });
@@ -141,12 +167,13 @@ pub async fn run(cfg: Config) -> Result<()> {
     Ok(())
 }
 
-#[instrument(skip(client, cache), fields(topic))]
+#[instrument(skip(client, cache, bus, payload), fields(topic))]
 async fn handle_message(
     topic: &str,
     payload: &[u8],
     mut client: RegistryServiceClient<Channel>,
     cache: IdCache,
+    bus: Option<&Bus>,
 ) -> Result<()> {
     let Some(friendly) = translator::friendly_name_from_topic(topic) else {
         debug!("ignoring non-zigbee topic");
@@ -156,9 +183,6 @@ async fn handle_message(
     let mut translated =
         translator::translate(friendly, payload).with_context(|| format!("translate {topic}"))?;
 
-    // Attach the cached ULID (if any) so the registry takes the update
-    // branch rather than attempting an insert that would violate the
-    // (integration, external_id) UNIQUE constraint.
     let cached_id = { cache.lock().await.get(friendly).cloned() };
     if let Some(id) = cached_id {
         translated.device.id = Some(id);
@@ -173,15 +197,27 @@ async fn handle_message(
         .with_context(|| format!("upsert {friendly}"))?
         .into_inner();
 
-    if let Some(d) = resp.device {
-        if let Some(id) = d.id {
-            cache.lock().await.insert(friendly.to_owned(), id);
-        }
+    let device_ulid = resp.device.and_then(|d| d.id).map(|u| u.value);
+    if let Some(id) = device_ulid.clone() {
+        cache
+            .lock()
+            .await
+            .insert(friendly.to_owned(), PbUlid { value: id });
     }
 
     if resp.created {
         info!(device = %friendly, "registered new device");
     }
+
+    // Publish one EntityState per recognised key on the bus so live
+    // consumers (panel, automation) see the value within ms of the
+    // MQTT publish.
+    if let (Some(bus), Some(id)) = (bus, device_ulid) {
+        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(payload) {
+            state_publisher::publish_all(bus, &id, friendly, &json).await;
+        }
+    }
+
     Ok(())
 }
 

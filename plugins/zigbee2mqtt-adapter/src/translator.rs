@@ -137,6 +137,17 @@ fn entity_spec(key: &str) -> Option<EntitySpec> {
     })
 }
 
+/// Filter an iterator of JSON keys down to those in our catalog.
+///
+/// Used by the bus publisher to decide which values are worth emitting
+/// (the rest are noisy zigbee2mqtt internals like `last_seen` / `update`).
+pub fn known_entity_keys<'a, I: IntoIterator<Item = &'a str>>(keys: I) -> Vec<String> {
+    keys.into_iter()
+        .filter(|k| entity_spec(k).is_some())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
 /// Extract the `friendly_name` segment from a topic like
 /// `zigbee2mqtt/kitchen-temp` or `zigbee2mqtt/kitchen-temp/availability`.
 #[must_use]
