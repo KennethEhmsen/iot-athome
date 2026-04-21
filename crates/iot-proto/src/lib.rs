@@ -14,7 +14,12 @@ pub use headers::*;
 /// Generated Protobuf types.
 ///
 /// Lints are silenced here because prost/tonic generate code we don't own.
-#[allow(clippy::all, clippy::pedantic, clippy::nursery, missing_debug_implementations)]
+#[allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    missing_debug_implementations
+)]
 pub mod iot {
     pub mod common {
         pub mod v1 {
