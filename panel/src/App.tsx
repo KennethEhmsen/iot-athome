@@ -1,5 +1,5 @@
 import { NavLink, Route, Routes } from "react-router-dom";
-import { useAuth } from "./auth/AuthProvider";
+import { useAuth } from "./auth/useAuth";
 import { signIn, signOut } from "./auth/oidc";
 import { ErrorBoundary } from "./ErrorBoundary";
 import Callback from "./pages/Callback";

@@ -29,13 +29,13 @@ one new adapter (Z-Wave or 433-SDR — TBD in W2).
 - [x] First compilable demo: `plugins/demo-echo/` with `.cargo/config.toml` pinning `wasm32-wasip2`. Produces a 3.5 MB debug `.wasm` component verified via the `\0asm` magic.
 - [x] WASI p2 preview-adapter imports (`wasi:cli/environment`, stdio, etc.) linked via `wasmtime_wasi::p2::add_to_linker_async`.
 
-### W2 — Capability enforcement + one real host call
+### W2 — Capability enforcement + one real host call ✅ (2026-04-20)
 
-- [x] Manifest loader: parse `plugin-manifest.schema.json` at install, store a `CapabilityMap` with the plugin instance. (W1 landed the `CapabilityMap` struct + matcher; W2 wires it to the manifest YAML parser.)
-- [ ] `bus::publish` host impl checks subject against `capabilities.bus.publish` before calling `iot_bus::Bus::publish_proto`. (W1 impl stubs the `iot_bus::Bus::publish_proto` call — it logs the intended publish. W2 wires the real bus.)
-- [ ] `log::emit` host impl forwards to `tracing` with plugin id as a span field.
-- [ ] Deny test: a plugin publishing on an out-of-scope subject gets `capability.denied`, audit entry recorded.
-- [ ] `demo-echo` actually echoes: on-message → bus.publish back on a mirror subject.
+- [x] Manifest loader: parse `plugin-manifest.schema.json` at install, store a `CapabilityMap` with the plugin instance. `crates/iot-plugin-host/src/manifest.rs` parses the YAML via serde into a strongly-typed `Manifest { capabilities: CapabilityMap, resources, … }`, enforces `schema_version == 1` and `runtime == "wasm-component"`, 3 unit tests.
+- [x] `bus::publish` host impl checks subject against `capabilities.bus.publish` before calling `iot_bus::Bus::publish_proto`. The handler clones the `Bus` handle before `.await` (async-nats `Client` is `Arc`-backed) so the future stays `Send` — wasmtime's async bindgen rejects `!Send` futures.
+- [x] `log::emit` host impl forwards to `tracing` with plugin id as a span field (`plugin = %self.id`, target = plugin-supplied).
+- [x] Deny test: a plugin publishing on an out-of-scope subject gets `capability.denied`; audit entry recorded via free-fn `record_denied` (owned params, not `&self`, so the caller's future stays `Send`). `tests/roundtrip.rs::demo_echo_manifest_load_init_deny_audit` asserts both the `PluginError` code and that `AuditLog::verify()` passes after the write.
+- [x] `demo-echo` actually echoes: `on_message` → `bus::publish(&format!("{subject}.echo"), …)`.
 
 ### W3 — Installation + signing
 

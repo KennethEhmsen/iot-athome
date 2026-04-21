@@ -4,6 +4,10 @@
 Cargo.lock.backup
 *.pdb
 
+# Plugin wasm build artifacts — produced by the demo-echo/plugin build
+# step, copied next to manifest.yaml by the roundtrip test fixture.
+plugins/*/plugin.wasm
+
 # --- Node / Panel ---
 node_modules/
 .pnpm-store/

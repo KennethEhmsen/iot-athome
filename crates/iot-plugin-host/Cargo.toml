@@ -19,12 +19,15 @@ path = "src/main.rs"
 iot-core = { path = "../iot-core" }
 iot-proto = { path = "../iot-proto" }
 iot-bus = { path = "../iot-bus" }
+iot-audit = { path = "../iot-audit" }
 iot-config = { path = "../iot-config" }
 iot-observability = { path = "../iot-observability" }
 
 anyhow.workspace = true
 async-trait.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 tracing.workspace = true

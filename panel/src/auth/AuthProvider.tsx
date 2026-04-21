@@ -1,14 +1,7 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { User } from "oidc-client-ts";
+import { AuthContext } from "./AuthContext";
 import { OIDC_ENABLED, currentUser, userManager } from "./oidc";
-
-interface AuthState {
-  user: User | null;
-  loading: boolean;
-  enabled: boolean;
-}
-
-const Ctx = createContext<AuthState>({ user: null, loading: true, enabled: false });
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
@@ -38,10 +31,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <Ctx.Provider value={{ user, loading, enabled: OIDC_ENABLED }}>{children}</Ctx.Provider>
+    <AuthContext.Provider value={{ user, loading, enabled: OIDC_ENABLED }}>
+      {children}
+    </AuthContext.Provider>
   );
-}
-
-export function useAuth() {
-  return useContext(Ctx);
 }
