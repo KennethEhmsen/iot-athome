@@ -90,7 +90,10 @@ jobs:
         target:
           - x86_64-unknown-linux-gnu
           - aarch64-unknown-linux-gnu
-          - wasm32-wasip2
+          # wasm32-wasip2 returns in M2 when we have actual WASM plugins.
+          # The workspace root pulls sqlx / wasmtime / async-nats, none of
+          # which target wasip2; a dedicated plugin build matrix lands with
+          # the SDK's WIT world.
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
