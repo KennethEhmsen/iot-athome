@@ -21,6 +21,11 @@ exclude = [
   "firmware/*",
   "services/ml",
   "panel",
+  # WASM plugins build standalone for the wasm32-wasip2 target. They're
+  # not workspace members because the host target never needs to link
+  # their cdylib output. `cargo build` from the plugin directory (with
+  # the target pinned in its own .cargo/config.toml) is the entry point.
+  "plugins/demo-echo",
 ]
 
 [workspace.package]

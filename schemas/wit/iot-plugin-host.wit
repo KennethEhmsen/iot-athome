@@ -51,22 +51,32 @@ interface log {
     emit: func(level: level, target: string, message: string);
 }
 
-/// The world a plugin imports from + exports to the host.
-world plugin {
-    import bus;
-    import log;
+/// Exports a plugin must implement.
+///
+/// Grouping under an interface (rather than leaving as world-level free
+/// functions) makes wit-bindgen emit a single `__export_world_plugin_cabi`
+/// macro; two world-level exports produce a duplicate-name error.
+interface runtime {
+    use types.{plugin-error, payload};
 
     /// Called once, after capabilities are verified and the plugin is
     /// loaded. Blocks the host's load routine; long-running work should
     /// be spawned via future `tasks` (1.1+).
-    export init: func() -> result<_, types.plugin-error>;
+    init: func() -> result<_, plugin-error>;
 
     /// Called on every incoming bus message matching the plugin's
     /// `capabilities.bus.subscribe` patterns. 1.1+ will add a stream
     /// variant; for 1.0 the host calls once per message.
-    export on-message: func(
+    on-message: func(
         subject: string,
         iot-type: string,
-        payload: types.payload,
-    ) -> result<_, types.plugin-error>;
+        payload: payload,
+    ) -> result<_, plugin-error>;
+}
+
+/// The world a plugin imports from + exports to the host.
+world plugin {
+    import bus;
+    import log;
+    export runtime;
 }

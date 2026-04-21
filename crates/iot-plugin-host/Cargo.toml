@@ -23,8 +23,13 @@ iot-config = { path = "../iot-config" }
 iot-observability = { path = "../iot-observability" }
 
 anyhow.workspace = true
+async-trait.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 tracing.workspace = true
 wasmtime.workspace = true
+# The wasm32-wasip2 target's preview-2 adapter links wasi:cli/stdin/etc.
+# imports even for plugins that never call stdio; we satisfy those by
+# wiring wasmtime-wasi's linker adder.
+wasmtime-wasi.workspace = true

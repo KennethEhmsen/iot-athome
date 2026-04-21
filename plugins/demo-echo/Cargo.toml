@@ -1,0 +1,15 @@
+[package]
+name = "demo-echo"
+version = "0.1.0"
+edition = "2021"
+description = "Reference plugin — echoes every on-message back on a .echo subject."
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+iot-plugin-sdk-rust = { path = "../../crates/iot-plugin-sdk-rust" }
+
+[package.metadata.component]
+package = "iot:demo-echo"

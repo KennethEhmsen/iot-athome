@@ -12,7 +12,16 @@ description = "IoT-AtHome — Rust SDK for writing WASM Component Model plugins.
 workspace = true
 
 [dependencies]
+# Keep the SDK deps minimal: this crate compiles as a dependency of a
+# wasm32-wasip2 cdylib plugin. Anything pulling tonic / socket2 / reqwest
+# breaks the plugin build.
 iot-core = { path = "../iot-core" }
-iot-proto = { path = "../iot-proto" }
 serde.workspace = true
 thiserror.workspace = true
+# wit-bindgen emits the guest-side bindings (Guest trait, host-import
+# free fns) at compile time from the shared WIT world. See ADR-0012.
+wit-bindgen = "0.36"
+
+[package.metadata.docs.rs]
+# WASM plugins compile for wasm32-wasip2; docs can render on the host target.
+all-features = true
