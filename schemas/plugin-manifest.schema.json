@@ -224,8 +224,8 @@
     },
     "MqttTopicPattern": {
       "type": "string",
-      "pattern": "^[^#+]*([#+][^#+]*)?$",
-      "description": "MQTT topic filter."
+      "pattern": "^[\\w/+#\\-]+$",
+      "description": "MQTT topic filter. `+` matches exactly one level; `#` matches zero or more trailing levels. Broker enforces full semantics; this regex is a basic-shape guard."
     }
   }
 }

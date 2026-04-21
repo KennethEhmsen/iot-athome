@@ -1,0 +1,101 @@
+# IoT-AtHome plugin manifest — Mains Power, 3-phase.
+#
+# Status: SCAFFOLD. Firmware, models, host plugin, and UI tiles arrive in M4.
+# This manifest is checked into the repo so the platform's shape tooling
+# (validator, capability auditor, marketplace renderer) has a real target
+# to exercise.
+
+schema_version: 1
+id: power-meter-3ph
+name: Mains Power (3-phase)
+version: 0.0.0-scaffold
+description: >
+  3-phase mains monitoring via ATM90E32AS + 3 CT clamps + 3 voltage taps.
+  Publishes per-phase V/I/P/Q/S/PF/F + totals + harmonics. Capacity-guardian
+  privilege triggers deterministic load-shed when the hub forecasts overload.
+  REQUIRES ELECTRICIAN INSTALL (see README).
+authors: ["IoT-AtHome"]
+license: "Apache-2.0 OR MIT"
+homepage: "https://github.com/KennethEhmsen/iot-athome"
+
+runtime: wasm-component
+abi:
+  world: iot:plugin-host
+  version: 1.0.0
+entrypoint: plugin.wasm
+
+capabilities:
+  bus:
+    publish:
+      - "device.power-meter-3ph.>"
+      - "ml.power.>"
+      - "alert.power.>"
+    subscribe:
+      - "cmd.power-meter-3ph.>"
+  mqtt:
+    subscribe:
+      - "iot/power/+/#"
+    publish:
+      - "iot/power/+/calib"
+      - "iot/power/+/config"
+  ml:
+    train:
+      - "power.nilm.disaggregation"
+  policy:
+    # Elevated — surfaces a warning at install and requires explicit admin
+    # approval. Lets the plugin request load-shed actions through the
+    # automation engine's capacity guardian (design §8.7).
+    capacity_guardian: true
+
+resources:
+  memory_mb_max: 96
+  cpu_pct_max: 10
+  fuel_max: 5000000
+
+signatures:
+  # Scaffold signature. Real releases carry a Rekor-backed cosign-keyless
+  # entry per ADR-0006.
+  - mechanism: cosign-keyless
+    rekor_entry: "DEV-UNSIGNED"
+    identity: "dev@localhost"
+    issuer: "dev"
+
+sbom: sbom.cdx.json
+
+# Commissioning — per design §8.1, this plugin cannot operate until an
+# installer signs off on the wiring. The host gates upsert of the first
+# device on `requires_installer_cert`.
+commissioning:
+  required_fields:
+    - service_phases              # 3 (typically)
+    - service_amps_per_phase      # e.g. 63
+    - ct_ratio                    # 100:1
+    - vt_ratio                    # 10:1
+    - neutral_ct_present          # bool
+    - installer_cert_id           # regulated-electrician credential
+  requires_elevated_user: true
+  requires_installer_cert: true
+
+ui:
+  tiles:
+    - id: power-live
+      bundle: tiles/power-live.wasm.js
+      size: ["2x1", "4x2"]
+      permissions:
+        data: ["device.power-meter-3ph.>"]
+    - id: power-phases
+      bundle: tiles/power-phases.wasm.js
+      size: ["4x2", "4x3"]
+      permissions:
+        data: ["device.power-meter-3ph.>"]
+    - id: power-disaggregation
+      bundle: tiles/power-disaggregation.wasm.js
+      size: ["4x3"]
+      permissions:
+        data: ["device.power-meter-3ph.>", "ml.power.nilm.>"]
+    - id: power-commissioning-wizard
+      bundle: tiles/power-commissioning.wasm.js
+      size: ["4x4"]
+      permissions:
+        data: ["device.power-meter-3ph.>"]
+        actions: ["cmd.power-meter-3ph.calib", "cmd.power-meter-3ph.config"]

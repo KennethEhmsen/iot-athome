@@ -28,14 +28,18 @@ export interface StreamClient {
 /**
  * Open a reconnecting WebSocket to `/stream?topics=<filter>`. Reconnects
  * with linear back-off (capped at 10 s) on close or error.
+ *
+ * `token` is appended as `?token=<jwt>` because browsers can't set an
+ * `Authorization` header on a WebSocket handshake.
  */
-export function openStream(topics = "device.>"): StreamClient {
-  const url =
+export function openStream(topics = "device.>", token?: string | null): StreamClient {
+  const base =
     (location.protocol === "https:" ? "wss:" : "ws:") +
     "//" +
     location.host +
     "/stream?topics=" +
     encodeURIComponent(topics);
+  const url = token ? `${base}&token=${encodeURIComponent(token)}` : base;
 
   const eventHandlers: Array<(e: StreamEvent) => void> = [];
   const statusHandlers: Array<(s: StreamStatus) => void> = [];

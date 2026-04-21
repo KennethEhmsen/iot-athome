@@ -29,3 +29,7 @@ unparseable = "unparseable"
 Unparseable = "Unparseable"
 mis         = "mis"
 leafs       = "leafs"
+# Product names also need to bypass the word-level splitter that fires on
+# underscore-separated identifiers like `mosquitto_pub`.
+mosquitto   = "mosquitto"
+Mosquitto   = "Mosquitto"

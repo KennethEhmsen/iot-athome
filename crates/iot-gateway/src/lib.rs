@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod auth;
 pub mod handlers;
 pub mod json;
 pub mod state;
@@ -18,6 +19,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
+use axum::middleware;
 use axum::routing::get;
 use axum::Router;
 use iot_proto::iot::registry::v1::registry_service_client::RegistryServiceClient;
@@ -25,6 +27,8 @@ use serde::Deserialize;
 use tokio::net::TcpListener;
 use tonic::transport::Endpoint;
 use tracing::info;
+
+use crate::auth::{OidcConfig, Verifier};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -39,6 +43,12 @@ pub struct Config {
     /// Optional NATS connection for the `/stream` endpoint.
     #[serde(default)]
     pub bus: Option<iot_bus::Config>,
+
+    /// Optional OIDC bearer-token verification. When absent the gateway
+    /// runs in dev mode (no auth). When present, every `/api/v1/*` and
+    /// `/stream` request must carry a valid RS256 JWT from `issuer_url`.
+    #[serde(default)]
+    pub oidc: Option<OidcConfig>,
 }
 
 impl Default for Config {
@@ -47,6 +57,7 @@ impl Default for Config {
             listen: default_listen(),
             registry_url: default_registry_url(),
             bus: None,
+            oidc: None,
         }
     }
 }
@@ -86,13 +97,20 @@ pub async fn run(cfg: Config) -> Result<()> {
         None
     };
 
+    let verifier = cfg.oidc.clone().map(|o| {
+        info!(issuer = %o.issuer_url, aud = %o.audience, "OIDC bearer verification enabled");
+        Verifier::new(o)
+    });
+
     let state = state::AppState {
         registry_client,
         bus,
+        verifier,
     };
 
-    let app = Router::new()
-        .route("/healthz", get(handlers::health))
+    // REST routes under /api/v1 are gated by Bearer header. Middleware is
+    // a no-op when state.verifier is None (dev mode).
+    let rest = Router::new()
         .route("/api/v1/version", get(handlers::version))
         .route(
             "/api/v1/devices",
@@ -102,7 +120,17 @@ pub async fn run(cfg: Config) -> Result<()> {
             "/api/v1/devices/{id}",
             get(handlers::get_device).delete(handlers::delete_device),
         )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::bearer_middleware,
+        ));
+
+    let app = Router::new()
+        .route("/healthz", get(handlers::health))
+        // `/stream` self-authenticates via ?token= (WS handshakes can't set
+        // Authorization headers on the browser side).
         .route("/stream", get(stream::stream_handler))
+        .merge(rest)
         .with_state(state);
 
     let listener = TcpListener::bind(cfg.listen).await?;

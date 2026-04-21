@@ -13,6 +13,7 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::response::IntoResponse;
+// `IntoResponse` is used by the `.into_response()` method calls below.
 use base64::prelude::*;
 use futures::StreamExt as _;
 use iot_proto::iot::device::v1::EntityState;
@@ -28,6 +29,12 @@ pub struct StreamQuery {
     /// the allow-listed public prefixes.
     #[serde(default = "default_topics")]
     pub topics: String,
+
+    /// Fallback bearer for browsers that can't set Authorization on a
+    /// WebSocket handshake. Validated by the same `Verifier` as the
+    /// REST middleware when OIDC is enabled.
+    #[serde(default)]
+    pub token: Option<String>,
 }
 
 fn default_topics() -> String {
@@ -40,7 +47,23 @@ pub async fn stream_handler(
     ws: WebSocketUpgrade,
     Query(q): Query<StreamQuery>,
     State(state): State<AppState>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    // Auth: when OIDC is configured we REQUIRE a token= query param. Bearer
+    // header isn't settable on WS handshakes in browsers, so query is the
+    // canonical place.
+    if let Some(verifier) = state.verifier.as_ref() {
+        let Some(token) = &q.token else {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                "missing ?token= query param",
+            )
+                .into_response();
+        };
+        if let Err(e) = verifier.verify(token).await {
+            warn!(error = %e, "ws token rejected");
+            return (axum::http::StatusCode::UNAUTHORIZED, "invalid token").into_response();
+        }
+    }
     ws.on_upgrade(move |socket| handle_socket(socket, q.topics, state))
 }
 

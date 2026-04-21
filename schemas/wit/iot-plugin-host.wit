@@ -1,0 +1,72 @@
+// IoT-AtHome plugin host ABI.
+//
+// Versioned per ADR-0003: major bumps are breaking, minor bumps are
+// additive only. The host supports the latest major + one previous
+// for at least one full major cycle.
+//
+// Every host call is mediated by the plugin's declared capabilities
+// (plugin-manifest.schema.json). A plugin that calls `bus-publish`
+// on a subject outside its `bus.publish` allow-list gets a
+// capability-denied error at host-call time — not at load time.
+
+package iot:plugin-host@1.0.0;
+
+interface types {
+    /// Dotted-namespace stable error code (see ADR-0008).
+    /// Examples: "capability.denied", "bus.subject.invalid".
+    type error-code = string;
+
+    record plugin-error {
+        code: error-code,
+        message: string,
+    }
+
+    /// Opaque byte string. Plugins Protobuf-encode iot.device.v1 messages.
+    type payload = list<u8>;
+}
+
+/// Bus: publish typed messages on NATS subjects. Subscription support
+/// lands in a later minor (1.1+) once the first plugin needs it.
+interface bus {
+    use types.{plugin-error, payload};
+
+    /// Publish `payload` on `subject` with `iot-type` set as a bus header.
+    ///
+    /// Capability check: `subject` must match one of the plugin manifest's
+    /// `capabilities.bus.publish` patterns.
+    ///
+    /// `iot-type` is the fully-qualified Protobuf type name, e.g.
+    /// `iot.device.v1.EntityState`.
+    publish: func(
+        subject: string,
+        iot-type: string,
+        payload: payload,
+    ) -> result<_, plugin-error>;
+}
+
+/// Structured logging. The host routes these through its tracing
+/// subscriber so plugin logs join the host's span tree.
+interface log {
+    enum level { trace, debug, info, warn, error }
+    emit: func(level: level, target: string, message: string);
+}
+
+/// The world a plugin imports from + exports to the host.
+world plugin {
+    import bus;
+    import log;
+
+    /// Called once, after capabilities are verified and the plugin is
+    /// loaded. Blocks the host's load routine; long-running work should
+    /// be spawned via future `tasks` (1.1+).
+    export init: func() -> result<_, types.plugin-error>;
+
+    /// Called on every incoming bus message matching the plugin's
+    /// `capabilities.bus.subscribe` patterns. 1.1+ will add a stream
+    /// variant; for 1.0 the host calls once per message.
+    export on-message: func(
+        subject: string,
+        iot-type: string,
+        payload: types.payload,
+    ) -> result<_, types.plugin-error>;
+}

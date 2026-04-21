@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { listDevices, type Device } from "../api/devices";
-import { openStream, parseSubject, type StreamStatus } from "../api/stream";
+import { openStream, parseSubject, type StreamClient, type StreamStatus } from "../api/stream";
+import { getAccessToken, OIDC_ENABLED } from "../auth/oidc";
 
 interface EntityValue {
   value: unknown;
@@ -18,6 +19,8 @@ export default function Devices() {
 
   useEffect(() => {
     let alive = true;
+    let client: StreamClient | undefined;
+
     const refresh = async () => {
       try {
         const d = await listDevices();
@@ -34,11 +37,7 @@ export default function Devices() {
       if (alive) setLoading(false);
     });
 
-    const client = openStream("device.>");
-    client.onStatus((s) => {
-      if (alive) setStatus(s);
-    });
-    client.onEvent((evt) => {
+    const onEvent = (evt: { subject: string; value?: unknown; at?: string }) => {
       if (!alive) return;
       const parsed = parseSubject(evt.subject);
       if (!parsed || parsed.leaf !== "state") return;
@@ -55,11 +54,21 @@ export default function Devices() {
           [parsed.entity]: { value: evt.value, at: evt.at ?? "" },
         },
       }));
-    });
+    };
+
+    (async () => {
+      const token = OIDC_ENABLED ? await getAccessToken() : null;
+      if (!alive) return;
+      client = openStream("device.>", token);
+      client.onStatus((s) => {
+        if (alive) setStatus(s);
+      });
+      client.onEvent(onEvent);
+    })();
 
     return () => {
       alive = false;
-      client.close();
+      client?.close();
     };
   }, []);
 
