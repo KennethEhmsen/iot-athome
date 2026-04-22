@@ -45,6 +45,34 @@ pub struct Manifest {
     pub capabilities: CapabilityMap,
     #[serde(default)]
     pub resources: Resources,
+    /// Signature claim metadata. Multiple entries are allowed (e.g. one
+    /// cosign-keyless + one signed-by-key claim). The plugin host doesn't
+    /// trust the manifest's claims by themselves — they're informational
+    /// for `iotctl plugin list` and the panel; trust comes from
+    /// out-of-band cosign-style verification at install time.
+    #[serde(default)]
+    pub signatures: Vec<SignatureClaim>,
+}
+
+/// One element of `manifest.signatures[]`. Mirrors `cosign sign-blob` +
+/// Rekor / Fulcio output: a mechanism, an OIDC identity (for keyless),
+/// and a Rekor entry id.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SignatureClaim {
+    /// `cosign-keyless`, `cosign-key`, `minisign`, …
+    #[serde(default)]
+    pub mechanism: String,
+    /// OIDC subject for keyless mode (e.g. `developer@example.com`),
+    /// the key fingerprint for signed-by-key, etc.
+    #[serde(default)]
+    pub identity: String,
+    /// OIDC issuer for keyless mode (`https://github.com/login/oauth`,
+    /// `https://accounts.google.com`, …).
+    #[serde(default)]
+    pub issuer: String,
+    /// Rekor transparency-log entry UUID.
+    #[serde(default)]
+    pub rekor_entry: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

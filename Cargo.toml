@@ -101,6 +101,10 @@ sigstore = "0.10"
 # cosign keyless (Rekor + Fulcio) flow migrates later in M6 (ADR-0006).
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pem", "std"] }
 base64 = "0.22"
+# `iotctl plugin list` hashes the trust pubkey's SPKI for fingerprinting.
+# Already in the dep graph via async-nats / signatory; pinning here so we
+# get the same version cargo dedups to.
+sha2 = "0.10"
 # NATS account identity / per-plugin ed25519 credentials (ADR-0011 follow-up:
 # retires dev single-account setup).
 nkeys = "0.4"

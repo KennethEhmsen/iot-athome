@@ -80,8 +80,25 @@ async fn record_denied(
 }
 
 // ---------- bus host impl ----------
+//
+// Every host call is wrapped in a `#[tracing::instrument]` span that
+// carries `plugin`, `capability`, and the call-specific args (`subject`,
+// `bytes`, …). Once `iot_observability` ships traceparent propagation
+// (M3), these spans light up end-to-end across panel → gateway →
+// registry → plugin without further wiring.
 
 impl crate::component::iot::plugin_host::bus::Host for PluginState {
+    #[tracing::instrument(
+        name = "host_call",
+        skip(self, payload),
+        fields(
+            plugin = %self.id,
+            capability = "bus.publish",
+            subject = %subject,
+            iot_type = %iot_type,
+            bytes = payload.len(),
+        ),
+    )]
     async fn publish(
         &mut self,
         subject: String,
@@ -89,7 +106,7 @@ impl crate::component::iot::plugin_host::bus::Host for PluginState {
         payload: Vec<u8>,
     ) -> Result<(), PluginError> {
         if let Err(d) = self.capabilities.check_bus_publish(&subject) {
-            warn!(plugin = %self.id, subject, reason = d.code, "capability.denied");
+            warn!(reason = d.code, "capability.denied");
             record_denied(
                 self.audit.clone(),
                 self.id.clone(),
@@ -107,16 +124,10 @@ impl crate::component::iot::plugin_host::bus::Host for PluginState {
         // Arc'd internally) so we don't borrow `self` across the await —
         // otherwise the future is !Send and wasmtime's async trait rejects it.
         let Some(bus) = self.bus.clone() else {
-            debug!(
-                plugin = %self.id, subject, iot_type,
-                "bus.publish (no bus configured — dry run)"
-            );
+            debug!("bus.publish (no bus configured — dry run)");
             return Ok(());
         };
-        debug!(
-            plugin = %self.id, subject, iot_type, bytes = payload.len(),
-            "bus.publish"
-        );
+        debug!("bus.publish");
         bus.publish_proto(&subject, &iot_type, payload, None)
             .await
             .map_err(|e| PluginError {
@@ -129,6 +140,16 @@ impl crate::component::iot::plugin_host::bus::Host for PluginState {
 // ---------- log host impl ----------
 
 impl crate::component::iot::plugin_host::log::Host for PluginState {
+    #[tracing::instrument(
+        name = "host_call",
+        skip(self),
+        fields(
+            plugin = %self.id,
+            capability = "log.emit",
+            level = ?level,
+            target = %target,
+        ),
+    )]
     async fn emit(
         &mut self,
         level: crate::component::iot::plugin_host::log::Level,

@@ -30,7 +30,7 @@ use base64::Engine as _;
 use clap::Subcommand;
 use p256::ecdsa::signature::Verifier as _;
 use p256::ecdsa::{Signature, VerifyingKey};
-use p256::pkcs8::DecodePublicKey as _;
+use p256::pkcs8::{DecodePublicKey as _, EncodePublicKey as _};
 
 use iot_plugin_host::capabilities::CapabilityMap;
 use iot_plugin_host::manifest::Manifest;
@@ -85,6 +85,12 @@ pub enum PluginCmd {
             default_value = DEFAULT_PLUGIN_DIR,
         )]
         plugin_dir: PathBuf,
+        /// Optional trust pubkey. When set, list verifies each plugin's
+        /// detached signature and prints `verified <fingerprint>` /
+        /// `verification-failed`. Without it, signatures show as
+        /// `signed (unverified)` or `unsigned`.
+        #[arg(long, env = "IOT_PLUGIN_TRUST_PUB")]
+        trust_pub: Option<PathBuf>,
     },
     /// Remove an installed plugin by id.
     Uninstall {
@@ -116,7 +122,10 @@ pub fn run(cmd: &PluginCmd) -> Result<()> {
             *allow_vulnerabilities,
             *force,
         ),
-        PluginCmd::List { plugin_dir } => list(plugin_dir),
+        PluginCmd::List {
+            plugin_dir,
+            trust_pub,
+        } => list(plugin_dir, trust_pub.as_deref()),
         PluginCmd::Uninstall { id, plugin_dir } => uninstall(id, plugin_dir),
     }
 }
@@ -490,12 +499,89 @@ fn restrict_permissions(_path: &Path) -> Result<()> {
 
 // ------------------------------------------------------------- list / uninstall
 
-fn list(plugin_dir: &Path) -> Result<()> {
+/// Per-plugin signature posture. `Verified` carries the SHA-256 of the
+/// trust pubkey's DER-encoded SubjectPublicKeyInfo (cosign's "key
+/// fingerprint" convention) so two plugins signed by different keys
+/// show distinct columns.
+#[derive(Debug, Clone)]
+enum SignatureStatus {
+    /// Sig file present, verified against the supplied trust pubkey.
+    Verified { fingerprint: String },
+    /// Sig file present but verification failed (wrong key / tampered).
+    VerificationFailed,
+    /// Sig file present, no trust pubkey supplied to verify against.
+    SignedUnverified,
+    /// No signature file in the install dir.
+    Unsigned,
+}
+
+impl SignatureStatus {
+    fn label(&self) -> String {
+        match self {
+            Self::Verified { fingerprint } => format!("verified {}", &fingerprint[..16]),
+            Self::VerificationFailed => "verification-failed".to_owned(),
+            Self::SignedUnverified => "signed (unverified)".to_owned(),
+            Self::Unsigned => "unsigned".to_owned(),
+        }
+    }
+}
+
+/// Determine signature posture for a single installed plugin. `entrypoint`
+/// is the manifest-declared filename (typically `plugin.wasm`); the sig
+/// lives at `<entrypoint>.sig` inside `install_dir`.
+fn signature_status(
+    install_dir: &Path,
+    entrypoint: &str,
+    trust_pub: Option<&Path>,
+) -> SignatureStatus {
+    let wasm_path = install_dir.join(entrypoint);
+    let sig_path = wasm_path.with_extension(extension_with_suffix(&wasm_path, "sig"));
+    if !sig_path.is_file() {
+        return SignatureStatus::Unsigned;
+    }
+    let Some(trust_pub) = trust_pub else {
+        return SignatureStatus::SignedUnverified;
+    };
+    if verify_signature(&wasm_path, &sig_path, trust_pub).is_err() {
+        return SignatureStatus::VerificationFailed;
+    }
+    let fingerprint = pubkey_fingerprint(trust_pub).unwrap_or_else(|_| "unknown".to_owned());
+    SignatureStatus::Verified { fingerprint }
+}
+
+/// SHA-256 of the trust pubkey's DER-encoded SubjectPublicKeyInfo,
+/// hex-encoded. Matches `cosign public-key | openssl dgst -sha256`.
+fn pubkey_fingerprint(pub_pem: &Path) -> Result<String> {
+    use sha2::{Digest as _, Sha256};
+
+    let pem = fs::read_to_string(pub_pem)
+        .with_context(|| format!("read trust pubkey {}", pub_pem.display()))?;
+    // p256's `from_public_key_pem` accepts SPKI PEM; round-trip it to
+    // DER bytes for hashing.
+    let vk =
+        VerifyingKey::from_public_key_pem(&pem).map_err(|e| anyhow!("parse trust pubkey: {e}"))?;
+    let der = vk
+        .to_public_key_der()
+        .map_err(|e| anyhow!("encode trust pubkey to DER: {e}"))?;
+    let digest = Sha256::digest(der.as_bytes());
+    Ok(hex_encode(&digest))
+}
+
+/// Lower-case hex without external crates. 32 bytes -> 64 chars.
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = std::fmt::write(&mut s, format_args!("{b:02x}"));
+    }
+    s
+}
+
+fn list(plugin_dir: &Path, trust_pub: Option<&Path>) -> Result<()> {
     if !plugin_dir.exists() {
         println!("(no plugins installed at {})", plugin_dir.display());
         return Ok(());
     }
-    let mut entries = Vec::new();
+    let mut entries: Vec<(Manifest, std::path::PathBuf)> = Vec::new();
     for entry in
         fs::read_dir(plugin_dir).with_context(|| format!("read_dir {}", plugin_dir.display()))?
     {
@@ -503,12 +589,13 @@ fn list(plugin_dir: &Path) -> Result<()> {
         if !entry.file_type()?.is_dir() {
             continue;
         }
-        let manifest_path = entry.path().join("manifest.yaml");
+        let install_dir = entry.path();
+        let manifest_path = install_dir.join("manifest.yaml");
         if !manifest_path.is_file() {
             continue;
         }
         match Manifest::load(&manifest_path) {
-            Ok(m) => entries.push(m),
+            Ok(m) => entries.push((m, install_dir)),
             Err(e) => tracing::warn!(
                 path = %manifest_path.display(),
                 error = %e,
@@ -520,14 +607,38 @@ fn list(plugin_dir: &Path) -> Result<()> {
         println!("(no plugins installed at {})", plugin_dir.display());
         return Ok(());
     }
-    entries.sort_by(|a, b| a.id.cmp(&b.id));
-    for m in &entries {
+    entries.sort_by(|a, b| a.0.id.cmp(&b.0.id));
+    println!(
+        "{:<28} {:<10} {:<16} {:<28} {:<32}",
+        "ID", "VERSION", "RUNTIME", "SIGNATURE", "IDENTITY"
+    );
+    for (m, dir) in &entries {
+        let status = signature_status(dir, &m.entrypoint, trust_pub);
+        let identity = m
+            .signatures
+            .first()
+            .filter(|c| !c.identity.is_empty())
+            .map(|c| {
+                if c.issuer.is_empty() {
+                    c.identity.clone()
+                } else {
+                    format!("{} ({})", c.identity, c.issuer)
+                }
+            })
+            .unwrap_or_default();
         let pubs = m.capabilities.bus.publish.len();
         let subs = m.capabilities.bus.subscribe.len();
         println!(
-            "{:<28} {:<10} {} (publish:{pubs} subscribe:{subs})",
-            m.id, m.version, m.runtime,
+            "{:<28} {:<10} {:<16} {:<28} {:<32}",
+            m.id,
+            m.version,
+            m.runtime,
+            status.label(),
+            identity,
         );
+        // Capability counts on a continuation line so the main row stays
+        // grep-friendly.
+        println!("    capabilities: bus.publish={pubs}  bus.subscribe={subs}");
     }
     Ok(())
 }
@@ -551,12 +662,12 @@ fn uninstall(id: &str, plugin_dir: &Path) -> Result<()> {
 // --------------------------------------------------------------- tests
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use p256::ecdsa::signature::Signer as _;
     use p256::ecdsa::SigningKey;
-    use p256::pkcs8::{EncodePublicKey as _, LineEnding};
+    use p256::pkcs8::LineEnding;
     use rand_core::OsRng;
 
     const DEMO_MANIFEST: &str = r#"
@@ -709,7 +820,7 @@ capabilities:
         write_staging(staging.path(), DEMO_MANIFEST, FAKE_WASM);
 
         install_allow_unsigned(staging.path(), installed.path(), None, false).unwrap();
-        list(installed.path()).expect("list");
+        list(installed.path(), None).expect("list");
         uninstall("test-plugin", installed.path()).expect("uninstall");
         assert!(!installed.path().join("test-plugin").exists());
     }
@@ -805,6 +916,126 @@ capabilities:
 
         install_allow_unsigned(staging.path(), installed.path(), None, false)
             .expect("no vulnerabilities field should pass");
+    }
+
+    // ----------------------------------------------------- signature posture
+
+    #[test]
+    fn signature_status_unsigned_when_no_sig_file() {
+        let staging = tempfile::tempdir().unwrap();
+        let installed = tempfile::tempdir().unwrap();
+        write_staging(staging.path(), DEMO_MANIFEST, FAKE_WASM);
+        install_allow_unsigned(staging.path(), installed.path(), None, false).unwrap();
+
+        let dest = installed.path().join("test-plugin");
+        let status = signature_status(&dest, "plugin.wasm", None);
+        assert!(matches!(status, SignatureStatus::Unsigned), "{status:?}");
+    }
+
+    #[test]
+    fn signature_status_signed_unverified_without_trust_pub() {
+        let staging = tempfile::tempdir().unwrap();
+        let installed = tempfile::tempdir().unwrap();
+        write_staging(staging.path(), DEMO_MANIFEST, FAKE_WASM);
+        sign_and_export(staging.path(), FAKE_WASM);
+        let trust_pub = staging.path().join("cosign.pub");
+        install(
+            staging.path(),
+            installed.path(),
+            Some(&trust_pub),
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+
+        let dest = installed.path().join("test-plugin");
+        let status = signature_status(&dest, "plugin.wasm", None);
+        assert!(
+            matches!(status, SignatureStatus::SignedUnverified),
+            "{status:?}"
+        );
+    }
+
+    #[test]
+    fn signature_status_verified_with_fingerprint() {
+        let staging = tempfile::tempdir().unwrap();
+        let installed = tempfile::tempdir().unwrap();
+        write_staging(staging.path(), DEMO_MANIFEST, FAKE_WASM);
+        sign_and_export(staging.path(), FAKE_WASM);
+        let trust_pub = staging.path().join("cosign.pub");
+        install(
+            staging.path(),
+            installed.path(),
+            Some(&trust_pub),
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+
+        let dest = installed.path().join("test-plugin");
+        let status = signature_status(&dest, "plugin.wasm", Some(&trust_pub));
+        match status {
+            SignatureStatus::Verified { fingerprint } => {
+                // SHA-256 hex = 64 chars.
+                assert_eq!(fingerprint.len(), 64);
+                assert!(fingerprint.chars().all(|c| c.is_ascii_hexdigit()));
+            }
+            other => panic!("expected Verified, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn signature_status_verification_failed_with_wrong_pubkey() {
+        let staging = tempfile::tempdir().unwrap();
+        let installed = tempfile::tempdir().unwrap();
+        write_staging(staging.path(), DEMO_MANIFEST, FAKE_WASM);
+        sign_and_export(staging.path(), FAKE_WASM);
+        let trust_pub = staging.path().join("cosign.pub");
+        install(
+            staging.path(),
+            installed.path(),
+            Some(&trust_pub),
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+
+        // Generate a *different* trust pub that won't match the install's sig.
+        let other = tempfile::tempdir().unwrap();
+        let sk2 = SigningKey::random(&mut OsRng);
+        let pem2 = sk2
+            .verifying_key()
+            .to_public_key_pem(LineEnding::LF)
+            .unwrap();
+        let other_pub = other.path().join("other.pub");
+        fs::write(&other_pub, pem2).unwrap();
+
+        let dest = installed.path().join("test-plugin");
+        let status = signature_status(&dest, "plugin.wasm", Some(&other_pub));
+        assert!(
+            matches!(status, SignatureStatus::VerificationFailed),
+            "{status:?}"
+        );
+    }
+
+    #[test]
+    fn pubkey_fingerprint_is_stable() {
+        // Same key in same PEM file → same fingerprint twice in a row.
+        let dir = tempfile::tempdir().unwrap();
+        let sk = SigningKey::random(&mut OsRng);
+        let pem = sk
+            .verifying_key()
+            .to_public_key_pem(LineEnding::LF)
+            .unwrap();
+        let key = dir.path().join("k.pub");
+        fs::write(&key, pem).unwrap();
+        let a = pubkey_fingerprint(&key).unwrap();
+        let b = pubkey_fingerprint(&key).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 64);
     }
 
     #[test]
