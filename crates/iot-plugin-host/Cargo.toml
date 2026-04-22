@@ -36,3 +36,7 @@ wasmtime.workspace = true
 # imports even for plugins that never call stdio; we satisfy those by
 # wiring wasmtime-wasi's linker adder.
 wasmtime-wasi.workspace = true
+
+[dev-dependencies]
+# Supervisor DLQ marker tests write into a temp dir.
+tempfile = "3.14"

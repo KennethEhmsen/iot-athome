@@ -34,6 +34,7 @@ use p256::pkcs8::{DecodePublicKey as _, EncodePublicKey as _};
 
 use iot_plugin_host::capabilities::CapabilityMap;
 use iot_plugin_host::manifest::Manifest;
+use iot_plugin_host::supervisor;
 
 /// Default install root. Kept in sync with `iot_plugin_host::Config`'s own
 /// default so `iotctl plugin install` writes to the same place the host
@@ -609,11 +610,16 @@ fn list(plugin_dir: &Path, trust_pub: Option<&Path>) -> Result<()> {
     }
     entries.sort_by(|a, b| a.0.id.cmp(&b.0.id));
     println!(
-        "{:<28} {:<10} {:<16} {:<28} {:<32}",
-        "ID", "VERSION", "RUNTIME", "SIGNATURE", "IDENTITY"
+        "{:<28} {:<10} {:<14} {:<16} {:<28} {:<32}",
+        "ID", "VERSION", "HEALTH", "RUNTIME", "SIGNATURE", "IDENTITY"
     );
     for (m, dir) in &entries {
         let status = signature_status(dir, &m.entrypoint, trust_pub);
+        let health = if supervisor::is_dead_lettered(dir) {
+            "dead-lettered"
+        } else {
+            "healthy"
+        };
         let identity = m
             .signatures
             .first()
@@ -628,17 +634,21 @@ fn list(plugin_dir: &Path, trust_pub: Option<&Path>) -> Result<()> {
             .unwrap_or_default();
         let pubs = m.capabilities.bus.publish.len();
         let subs = m.capabilities.bus.subscribe.len();
+        let mqtt_subs = m.capabilities.mqtt.subscribe.len();
         println!(
-            "{:<28} {:<10} {:<16} {:<28} {:<32}",
+            "{:<28} {:<10} {:<14} {:<16} {:<28} {:<32}",
             m.id,
             m.version,
+            health,
             m.runtime,
             status.label(),
             identity,
         );
         // Capability counts on a continuation line so the main row stays
         // grep-friendly.
-        println!("    capabilities: bus.publish={pubs}  bus.subscribe={subs}");
+        println!(
+            "    capabilities: bus.publish={pubs}  bus.subscribe={subs}  mqtt.subscribe={mqtt_subs}"
+        );
     }
     Ok(())
 }
@@ -823,6 +833,25 @@ capabilities:
         list(installed.path(), None).expect("list");
         uninstall("test-plugin", installed.path()).expect("uninstall");
         assert!(!installed.path().join("test-plugin").exists());
+    }
+
+    #[test]
+    fn list_picks_up_dlq_marker() {
+        let staging = tempfile::tempdir().unwrap();
+        let installed = tempfile::tempdir().unwrap();
+        write_staging(staging.path(), DEMO_MANIFEST, FAKE_WASM);
+        install_allow_unsigned(staging.path(), installed.path(), None, false).unwrap();
+
+        // Simulate the host having given up on this plugin.
+        let dest = installed.path().join("test-plugin");
+        supervisor::write_dead_lettered(&dest, "init-trap: divide by zero").unwrap();
+
+        // The list call doesn't return the rendered text — we just make
+        // sure the health lookup itself sees the marker and the call
+        // doesn't error. The deeper assertion lives on the supervisor
+        // module's own unit tests (`dlq_marker_roundtrip`).
+        assert!(supervisor::is_dead_lettered(&dest));
+        list(installed.path(), None).expect("list after DLQ");
     }
 
     // ----------------------------------------------------------- CVE scan

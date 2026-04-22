@@ -10,6 +10,7 @@
 pub mod capabilities;
 pub mod component;
 pub mod manifest;
+pub mod supervisor;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
