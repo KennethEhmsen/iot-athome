@@ -81,6 +81,10 @@ async-nats = "0.47"
 
 # --- mqtt ---
 # use-rustls: mandatory. OpenSSL is banned by ADR-0006 / deny.toml.
+# 0.25 was tried — it still hard-pins rustls-webpki 0.102.8 (the
+# vulnerable line) for CRL parsing, so the bump didn't move the needle
+# on the RUSTSEC-2026-{0049,0098,0099,0104} family. Staying on 0.24
+# until rumqttc upstream actually moves to webpki 0.103.x.
 rumqttc = { version = "0.24", default-features = false, features = ["use-rustls"] }
 
 # --- storage ---

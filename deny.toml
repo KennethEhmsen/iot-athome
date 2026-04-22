@@ -61,10 +61,15 @@ ignore = [
   # rustls-webpki 0.102.8 CVEs — transitive via rumqttc 0.24 → rustls 0.22.
   # rumqttc upstream has not yet bumped; the adapter uses MQTT over the
   # local Docker network only, so CRL/name-constraint edge cases aren't
-  # reachable. Revisit: on next rumqttc release (tracking upstream).
+  # reachable. Tried rumqttc 0.25 — it still hard-pins webpki 0.102.8 for
+  # CRL parsing, so the upgrade didn't help. Revisit: on next rumqttc
+  # release that actually bumps webpki to 0.103.x.
   "RUSTSEC-2026-0049",
   "RUSTSEC-2026-0098",
   "RUSTSEC-2026-0099",
+  # RUSTSEC-2026-0104 — reachable panic in BorrowedCertRevocationList::from_der.
+  # Same root cause; CRL parsing isn't on the rumqttc → broker code path.
+  "RUSTSEC-2026-0104",
 ]
 yanked = "deny"
 
