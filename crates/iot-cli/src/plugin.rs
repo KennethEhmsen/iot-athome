@@ -237,7 +237,13 @@ fn install(
 
     // 2. Signature check — gating both allow-unsigned and trust-pub.
     let sig_path = wasm_path.with_extension(extension_with_suffix(&wasm_path, "sig"));
-    enforce_signature_policy(&manifest.id, &wasm_path, &sig_path, trust_pub, allow_unsigned)?;
+    enforce_signature_policy(
+        &manifest.id,
+        &wasm_path,
+        &sig_path,
+        trust_pub,
+        allow_unsigned,
+    )?;
 
     // 3. SBOM CVE check. Refuse install on any high/critical finding
     //    unless `--allow-vulnerabilities` is set.
