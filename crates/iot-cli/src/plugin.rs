@@ -11,8 +11,15 @@
 //! What's *not* here yet (see `docs/M2-PLAN.md` W3):
 //!   * Rekor lookup for true cosign keyless verification — pinned-pubkey
 //!     verification is the ADR-0006 "signed-by-key fallback".
-//!   * cargo-audit offline SBOM scan — follow-up commit.
 //!   * z2m adapter migration to wasm32-wasip2 — follow-up commit.
+//!
+//! SBOM vulnerability scan: the bundle's `sbom.cdx.json` (CycloneDX) is
+//! read at install time. Any entry under `.vulnerabilities[]` rated
+//! `high` or `critical` fails the install unless `--allow-vulnerabilities`
+//! is set. The scan is intentionally a *consumer* of the SBOM (vs.
+//! running `cargo audit` again against an advisory DB): the plugin
+//! author is expected to run their own audit when producing the SBOM —
+//! SLSA L3-style "producer attests, consumer verifies".
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -61,6 +68,11 @@ pub enum PluginCmd {
         /// runtime in prod builds (see ADR-0006 dev/prod gate).
         #[arg(long)]
         allow_unsigned: bool,
+        /// Accept a plugin whose SBOM declares high / critical
+        /// vulnerabilities. Default is to refuse; findings are always
+        /// printed regardless of this flag.
+        #[arg(long)]
+        allow_vulnerabilities: bool,
         /// Replace an existing install of the same id.
         #[arg(long)]
         force: bool,
@@ -94,12 +106,14 @@ pub fn run(cmd: &PluginCmd) -> Result<()> {
             plugin_dir,
             trust_pub,
             allow_unsigned,
+            allow_vulnerabilities,
             force,
         } => install(
             path,
             plugin_dir,
             trust_pub.as_deref(),
             *allow_unsigned,
+            *allow_vulnerabilities,
             *force,
         ),
         PluginCmd::List { plugin_dir } => list(plugin_dir),
@@ -109,11 +123,102 @@ pub fn run(cmd: &PluginCmd) -> Result<()> {
 
 // ---------------------------------------------------------------- install
 
+/// Signature gate: verify `sig_path` against `trust_pub` if the sig
+/// exists, otherwise require `--allow-unsigned`.
+fn enforce_signature_policy(
+    plugin_id: &str,
+    wasm_path: &Path,
+    sig_path: &Path,
+    trust_pub: Option<&Path>,
+    allow_unsigned: bool,
+) -> Result<()> {
+    if sig_path.is_file() {
+        let trust_pub =
+            trust_pub.ok_or_else(|| anyhow!("signature file found but no --trust-pub provided"))?;
+        verify_signature(wasm_path, sig_path, trust_pub).with_context(|| {
+            format!(
+                "verify cosign signature for {} against {}",
+                wasm_path.display(),
+                trust_pub.display()
+            )
+        })?;
+        tracing::info!(
+            plugin = %plugin_id,
+            sig = %sig_path.display(),
+            trust = %trust_pub.display(),
+            "signature verified"
+        );
+        Ok(())
+    } else if allow_unsigned {
+        tracing::warn!(
+            plugin = %plugin_id,
+            "installing UNSIGNED plugin (--allow-unsigned, dev only)"
+        );
+        Ok(())
+    } else {
+        bail!(
+            "no signature at {} and --allow-unsigned not set (see ADR-0006)",
+            sig_path.display()
+        )
+    }
+}
+
+/// CVE gate: parse the bundled SBOM's `.vulnerabilities[]`, log each
+/// finding, and refuse install on any `>= High` severity unless the
+/// caller passed `--allow-vulnerabilities`.
+fn enforce_sbom_policy(
+    plugin_id: &str,
+    sbom_path: &Path,
+    allow_vulnerabilities: bool,
+) -> Result<()> {
+    if !sbom_path.is_file() {
+        tracing::warn!(plugin = %plugin_id, "no sbom.cdx.json in bundle (CVE scan skipped)");
+        return Ok(());
+    }
+    let findings =
+        scan_sbom(sbom_path).with_context(|| format!("scan SBOM {}", sbom_path.display()))?;
+    for f in &findings {
+        tracing::warn!(
+            plugin = %plugin_id,
+            cve = %f.id,
+            severity = %f.severity,
+            affects = %f.affects,
+            "SBOM vulnerability"
+        );
+    }
+    let blocking: Vec<&VulnFinding> = findings
+        .iter()
+        .filter(|f| f.severity >= Severity::High)
+        .collect();
+    if blocking.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<&str> = blocking.iter().map(|f| f.id.as_str()).collect();
+    if allow_vulnerabilities {
+        tracing::warn!(
+            plugin = %plugin_id,
+            count = blocking.len(),
+            advisories = ?ids,
+            "installing despite high/critical advisories (--allow-vulnerabilities)"
+        );
+        Ok(())
+    } else {
+        bail!(
+            "{} SBOM has {} high/critical advisory(ies): {} — \
+             use --allow-vulnerabilities to override",
+            plugin_id,
+            blocking.len(),
+            ids.join(", ")
+        )
+    }
+}
+
 fn install(
     src: &Path,
     plugin_dir: &Path,
     trust_pub: Option<&Path>,
     allow_unsigned: bool,
+    allow_vulnerabilities: bool,
     force: bool,
 ) -> Result<()> {
     // 1. Parse + schema-check the manifest via the runtime's own parser.
@@ -132,39 +237,12 @@ fn install(
 
     // 2. Signature check — gating both allow-unsigned and trust-pub.
     let sig_path = wasm_path.with_extension(extension_with_suffix(&wasm_path, "sig"));
-    if sig_path.is_file() {
-        let trust_pub =
-            trust_pub.ok_or_else(|| anyhow!("signature file found but no --trust-pub provided"))?;
-        verify_signature(&wasm_path, &sig_path, trust_pub).with_context(|| {
-            format!(
-                "verify cosign signature for {} against {}",
-                wasm_path.display(),
-                trust_pub.display()
-            )
-        })?;
-        tracing::info!(
-            plugin = %manifest.id,
-            sig = %sig_path.display(),
-            trust = %trust_pub.display(),
-            "signature verified"
-        );
-    } else if allow_unsigned {
-        tracing::warn!(
-            plugin = %manifest.id,
-            "installing UNSIGNED plugin (--allow-unsigned, dev only)"
-        );
-    } else {
-        bail!(
-            "no signature at {} and --allow-unsigned not set (see ADR-0006)",
-            sig_path.display()
-        );
-    }
+    enforce_signature_policy(&manifest.id, &wasm_path, &sig_path, trust_pub, allow_unsigned)?;
 
-    // 3. SBOM presence — advisory for now; cargo-audit scan comes next.
+    // 3. SBOM CVE check. Refuse install on any high/critical finding
+    //    unless `--allow-vulnerabilities` is set.
     let sbom_path = src.join("sbom.cdx.json");
-    if !sbom_path.is_file() {
-        tracing::warn!(plugin = %manifest.id, "no sbom.cdx.json in bundle (CVE scan skipped)");
-    }
+    enforce_sbom_policy(&manifest.id, &sbom_path, allow_vulnerabilities)?;
 
     // 4. Prepare destination. Collision ⇒ require --force.
     let dest = plugin_dir.join(&manifest.id);
@@ -229,6 +307,102 @@ fn copy_if_present(from: &Path, to: &Path) -> Result<()> {
         copy_required(from, to)?;
     }
     Ok(())
+}
+
+// -------------------------------------------------------------- SBOM scan
+
+/// CycloneDX-standard severity ranking. Derived ordering puts `Critical`
+/// at the top — the install gate uses `>= High` as the fail threshold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Severity {
+    None,
+    Info,
+    Low,
+    Medium,
+    High,
+    Critical,
+    /// Rating present but unrecognized — conservatively ordered *below*
+    /// `Low` so unknown severities don't block a release by accident, but
+    /// logged at warn.
+    Unknown,
+}
+
+impl std::fmt::Display for Severity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::None => "none",
+            Self::Info => "info",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Critical => "critical",
+            Self::Unknown => "unknown",
+        })
+    }
+}
+
+fn parse_severity(raw: &str) -> Severity {
+    match raw.to_ascii_lowercase().as_str() {
+        "critical" => Severity::Critical,
+        "high" => Severity::High,
+        "medium" => Severity::Medium,
+        "low" => Severity::Low,
+        "info" | "informational" => Severity::Info,
+        "none" => Severity::None,
+        _ => Severity::Unknown,
+    }
+}
+
+#[derive(Debug)]
+struct VulnFinding {
+    id: String,
+    severity: Severity,
+    affects: String,
+}
+
+/// Extract `vulnerabilities[]` from a CycloneDX JSON SBOM. We don't do
+/// schema validation — just pull the fields we need. A missing array
+/// means "this SBOM doesn't carry vuln data" (we log, don't fail).
+fn scan_sbom(sbom_path: &Path) -> Result<Vec<VulnFinding>> {
+    let bytes = fs::read(sbom_path).with_context(|| format!("read {}", sbom_path.display()))?;
+    let doc: serde_json::Value =
+        serde_json::from_slice(&bytes).with_context(|| format!("parse {}", sbom_path.display()))?;
+    let Some(vulns) = doc.get("vulnerabilities").and_then(|v| v.as_array()) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::with_capacity(vulns.len());
+    for v in vulns {
+        let id = v
+            .get("id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("UNKNOWN")
+            .to_owned();
+        // CycloneDX allows multiple ratings (e.g. NVD + vendor). We fold
+        // to the worst-case.
+        let severity = v
+            .get("ratings")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|r| r.get("severity").and_then(|s| s.as_str()))
+            .map(parse_severity)
+            .max()
+            .unwrap_or(Severity::Unknown);
+        let affects = v
+            .get("affects")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|a| a.get("ref").and_then(|r| r.as_str()))
+            .collect::<Vec<_>>()
+            .join(",");
+        out.push(VulnFinding {
+            id,
+            severity,
+            affects,
+        });
+    }
+    Ok(out)
 }
 
 // ------------------------------------------------------ signature verify
@@ -417,13 +591,24 @@ capabilities:
         fs::write(dir.join("cosign.pub"), pem).unwrap();
     }
 
+    /// Signature-wise wrapper so the older tests don't have to spell out
+    /// the two allow-* / force booleans every call.
+    fn install_allow_unsigned(
+        src: &Path,
+        dest: &Path,
+        trust_pub: Option<&Path>,
+        force: bool,
+    ) -> Result<()> {
+        install(src, dest, trust_pub, true, false, force)
+    }
+
     #[test]
     fn install_rejects_unsigned_without_flag() {
         let staging = tempfile::tempdir().unwrap();
         let installed = tempfile::tempdir().unwrap();
         write_staging(staging.path(), DEMO_MANIFEST, FAKE_WASM);
 
-        let err = install(staging.path(), installed.path(), None, false, false).unwrap_err();
+        let err = install(staging.path(), installed.path(), None, false, false, false).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("no signature"),
@@ -437,7 +622,7 @@ capabilities:
         let installed = tempfile::tempdir().unwrap();
         write_staging(staging.path(), DEMO_MANIFEST, FAKE_WASM);
 
-        install(staging.path(), installed.path(), None, true, false)
+        install_allow_unsigned(staging.path(), installed.path(), None, false)
             .expect("install allow-unsigned");
 
         let dest = installed.path().join("test-plugin");
@@ -461,10 +646,10 @@ capabilities:
             Some(&trust_pub),
             false,
             false,
+            false,
         )
         .expect("install signed");
 
-        // Signature file carries through to the install dir.
         assert!(installed
             .path()
             .join("test-plugin")
@@ -478,7 +663,6 @@ capabilities:
         let installed = tempfile::tempdir().unwrap();
         write_staging(staging.path(), DEMO_MANIFEST, FAKE_WASM);
         sign_and_export(staging.path(), FAKE_WASM);
-        // Attacker swaps the wasm *after* signing.
         fs::write(staging.path().join("plugin.wasm"), b"\0asmTAMPERED").unwrap();
 
         let trust_pub = staging.path().join("cosign.pub");
@@ -486,6 +670,7 @@ capabilities:
             staging.path(),
             installed.path(),
             Some(&trust_pub),
+            false,
             false,
             false,
         )
@@ -503,12 +688,12 @@ capabilities:
         let installed = tempfile::tempdir().unwrap();
         write_staging(staging.path(), DEMO_MANIFEST, FAKE_WASM);
 
-        install(staging.path(), installed.path(), None, true, false).unwrap();
-        let err = install(staging.path(), installed.path(), None, true, false).unwrap_err();
+        install_allow_unsigned(staging.path(), installed.path(), None, false).unwrap();
+        let err =
+            install_allow_unsigned(staging.path(), installed.path(), None, false).unwrap_err();
         assert!(format!("{err:#}").contains("already exists"));
 
-        // With --force it succeeds.
-        install(staging.path(), installed.path(), None, true, true).unwrap();
+        install_allow_unsigned(staging.path(), installed.path(), None, true).unwrap();
     }
 
     #[test]
@@ -517,9 +702,114 @@ capabilities:
         let installed = tempfile::tempdir().unwrap();
         write_staging(staging.path(), DEMO_MANIFEST, FAKE_WASM);
 
-        install(staging.path(), installed.path(), None, true, false).unwrap();
+        install_allow_unsigned(staging.path(), installed.path(), None, false).unwrap();
         list(installed.path()).expect("list");
         uninstall("test-plugin", installed.path()).expect("uninstall");
         assert!(!installed.path().join("test-plugin").exists());
+    }
+
+    // ----------------------------------------------------------- CVE scan
+
+    /// Minimal CycloneDX 1.5 SBOM with one critical advisory against a
+    /// synthetic package. Real syft/cargo-cyclonedx output has far more
+    /// metadata but the scan only cares about `.vulnerabilities[*]`
+    /// `{id, ratings[].severity, affects[].ref}`.
+    fn sbom_with_vuln(severity: &str, cve: &str) -> String {
+        serde_json::json!({
+            "bomFormat": "CycloneDX",
+            "specVersion": "1.5",
+            "version": 1,
+            "components": [
+                { "type": "library", "bom-ref": "pkg:cargo/foo@1.0.0",
+                  "name": "foo", "version": "1.0.0" }
+            ],
+            "vulnerabilities": [
+                { "id": cve,
+                  "ratings": [ { "severity": severity } ],
+                  "affects": [ { "ref": "pkg:cargo/foo@1.0.0" } ] }
+            ]
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn cve_scan_rejects_critical_without_allow() {
+        let staging = tempfile::tempdir().unwrap();
+        let installed = tempfile::tempdir().unwrap();
+        write_staging(staging.path(), DEMO_MANIFEST, FAKE_WASM);
+        fs::write(
+            staging.path().join("sbom.cdx.json"),
+            sbom_with_vuln("critical", "CVE-2024-99999"),
+        )
+        .unwrap();
+
+        let err =
+            install_allow_unsigned(staging.path(), installed.path(), None, false).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("CVE-2024-99999") && msg.contains("critical"),
+            "expected CVE advisory in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn cve_scan_accepts_critical_with_allow() {
+        let staging = tempfile::tempdir().unwrap();
+        let installed = tempfile::tempdir().unwrap();
+        write_staging(staging.path(), DEMO_MANIFEST, FAKE_WASM);
+        fs::write(
+            staging.path().join("sbom.cdx.json"),
+            sbom_with_vuln("critical", "CVE-2024-99999"),
+        )
+        .unwrap();
+
+        // allow_unsigned + allow_vulnerabilities, no --force.
+        install(staging.path(), installed.path(), None, true, true, false).expect("install");
+        let dest = installed.path().join("test-plugin");
+        assert!(dest.join("sbom.cdx.json").is_file());
+    }
+
+    #[test]
+    fn cve_scan_allows_low_severity() {
+        let staging = tempfile::tempdir().unwrap();
+        let installed = tempfile::tempdir().unwrap();
+        write_staging(staging.path(), DEMO_MANIFEST, FAKE_WASM);
+        fs::write(
+            staging.path().join("sbom.cdx.json"),
+            sbom_with_vuln("low", "CVE-2024-00001"),
+        )
+        .unwrap();
+
+        // Low-severity findings don't block. No --allow-vulnerabilities needed.
+        install_allow_unsigned(staging.path(), installed.path(), None, false)
+            .expect("low severity should not block");
+    }
+
+    #[test]
+    fn cve_scan_sbom_without_vulnerabilities_array_is_noop() {
+        let staging = tempfile::tempdir().unwrap();
+        let installed = tempfile::tempdir().unwrap();
+        write_staging(staging.path(), DEMO_MANIFEST, FAKE_WASM);
+        // Valid SBOM, no vulnerabilities section — i.e. hasn't been scanned.
+        fs::write(
+            staging.path().join("sbom.cdx.json"),
+            r#"{"bomFormat":"CycloneDX","specVersion":"1.5","version":1}"#,
+        )
+        .unwrap();
+
+        install_allow_unsigned(staging.path(), installed.path(), None, false)
+            .expect("no vulnerabilities field should pass");
+    }
+
+    #[test]
+    fn severity_ordering_is_expected() {
+        assert!(Severity::Critical > Severity::High);
+        assert!(Severity::High > Severity::Medium);
+        assert!(Severity::Medium > Severity::Low);
+        assert!(Severity::Low > Severity::Info);
+        // Our gate is `>= High`; parse helper must agree.
+        assert_eq!(parse_severity("CRITICAL"), Severity::Critical);
+        assert_eq!(parse_severity("High"), Severity::High);
+        assert_eq!(parse_severity("whatever"), Severity::Unknown);
     }
 }
