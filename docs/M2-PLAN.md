@@ -39,11 +39,11 @@ one new adapter (Z-Wave or 433-SDR — TBD in W2).
 
 ### W3 — Installation + signing
 
-- [ ] `iotctl plugin install <path>` CLI command (adds to iot-cli).
-- [ ] Cosign signature verification at install time (ADR-0006 keyless chain).
-- [ ] SBOM extraction + CVE check via cargo-audit's offline database.
-- [ ] Per-plugin NATS account generation: issue a new account with publish/subscribe ACLs from the manifest, store credentials in `/var/lib/iotathome/plugins/<id>/nats.creds`.
-- [ ] Migrate `zigbee2mqtt-adapter` from its M1 systemd shape: same Rust code, but compiled to wasm32-wasip2 and loaded via the plugin host. ADR-0011 is superseded at this point.
+- [x] `iotctl plugin install <path>` CLI command (adds to iot-cli) — new `crates/iot-cli/src/plugin.rs` with `install / list / uninstall` subcommands. Re-uses `iot_plugin_host::manifest::Manifest::load` so the CLI and runtime agree byte-for-byte on what a valid manifest is.
+- [x] Cosign signature verification at install time (ADR-0006 keyless chain) — pinned-pubkey ECDSA-P256 / SHA-256 / DER-encoded signature, matching `cosign sign-blob` output. `--allow-unsigned` for dev, `--trust-pub` (also `IOT_PLUGIN_TRUST_PUB`) pins the public key. Rekor/Fulcio keyless lookup deferred to M6 per the risk table below.
+- [ ] SBOM extraction + CVE check via cargo-audit's offline database. Presence check + warning wired (W3 install warns if `sbom.cdx.json` is missing); cargo-audit scan itself is a follow-up commit.
+- [x] Per-plugin NATS account generation: `iotctl plugin install` now mints a fresh ed25519 nkey for each plugin, writes the seed to `<plugin_dir>/<id>/nats.nkey` (0600 on Unix), and emits `<plugin_dir>/<id>/acl.json` with the manifest's publish/subscribe allow-lists for the broker-side bootstrap. Operator-signed user-JWT issuance is a separate concern (lands with the operator-key infra).
+- [ ] Migrate `zigbee2mqtt-adapter` from its M1 systemd shape: same Rust code, but compiled to wasm32-wasip2 and loaded via the plugin host. ADR-0011 is superseded at this point. Deferred to a follow-up commit — rumqttc on wasip2 needs validation first (risk table).
 
 ### W4 — Polish + second adapter
 

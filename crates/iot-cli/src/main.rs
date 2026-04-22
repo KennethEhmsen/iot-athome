@@ -5,6 +5,13 @@
 //!   upserts a device via the registry gRPC.
 //! * `iotctl device list [--integration ...] [--room ...]`: streams devices.
 //! * `iotctl device get <ulid>`: fetches one device.
+//! * `iotctl plugin install <path>`: validate manifest, verify cosign
+//!   signature, generate per-plugin NATS identity, copy into the plugin
+//!   dir.
+//! * `iotctl plugin list`: enumerate installed plugins.
+//! * `iotctl plugin uninstall <id>`: remove an installed plugin.
+
+mod plugin;
 
 use anyhow::{anyhow, Context as _, Result};
 use clap::{Parser, Subcommand};
@@ -44,6 +51,9 @@ enum Command {
     /// Device management (via registry gRPC).
     #[command(subcommand)]
     Device(DeviceCmd),
+    /// Plugin management (local filesystem; no broker required).
+    #[command(subcommand)]
+    Plugin(plugin::PluginCmd),
 }
 
 #[derive(Debug, Subcommand)]
@@ -96,6 +106,7 @@ async fn main() -> Result<()> {
         }
         Command::Ping => cmd_ping().await,
         Command::Device(sub) => cmd_device(&cli.registry, sub).await,
+        Command::Plugin(sub) => plugin::run(sub),
     };
 
     iot_observability::shutdown();

@@ -20,15 +20,30 @@ iot-core = { path = "../iot-core" }
 iot-proto = { path = "../iot-proto" }
 iot-bus = { path = "../iot-bus" }
 iot-observability = { path = "../iot-observability" }
+# `iotctl plugin install` reuses the host's manifest parser so the CLI and
+# the runtime agree on what a valid manifest is, byte-for-byte.
+iot-plugin-host = { path = "../iot-plugin-host" }
 
 anyhow.workspace = true
 async-nats.workspace = true
+base64.workspace = true
 clap.workspace = true
 futures.workspace = true
+nkeys.workspace = true
+p256.workspace = true
 prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 tonic.workspace = true
 tracing.workspace = true
 ulid.workspace = true
+
+[dev-dependencies]
+# Integration test signs a synthetic plugin.wasm with a freshly-generated
+# P-256 key, then verifies the install path accepts it. Needs the
+# `signing` feature + an OS random generator.
+p256 = { workspace = true, features = ["ecdsa", "pem", "std"] }
+rand_core = { version = "0.6", features = ["std"] }
+tempfile = "3.14"
