@@ -1,7 +1,10 @@
 //! Plugin SDK (Rust).
 //!
 //! Plugins compile to a WASM Component Model module targeting the
-//! `iot:plugin-host@1.0.0` WIT world ([schemas/wit/iot-plugin-host.wit]).
+//! `iot:plugin-host@1.1.0` WIT world ([schemas/wit/iot-plugin-host.wit]).
+//! 1.1.0 added the `mqtt` interface + `on-mqtt-message` runtime export
+//! (ADR-0013). Plugins that don't handle MQTT still need to implement
+//! `on_mqtt_message` — return `Ok(())` as a no-op.
 //!
 //! Usage (from a plugin crate that depends on this SDK):
 //!

@@ -9,7 +9,10 @@
 // on a subject outside its `bus.publish` allow-list gets a
 // capability-denied error at host-call time — not at load time.
 
-package iot:plugin-host@1.0.0;
+// Additive minor bumps:
+//   1.1.0 — mqtt host interface + on-mqtt-message runtime export
+//           (ADR-0013, M2 W4).
+package iot:plugin-host@1.1.0;
 
 interface types {
     /// Dotted-namespace stable error code (see ADR-0008).
@@ -51,6 +54,31 @@ interface log {
     emit: func(level: level, target: string, message: string);
 }
 
+/// MQTT: the host owns one broker connection and multiplexes subscribe/
+/// publish across plugins. Plugins never see the broker socket or TLS
+/// material. Per ADR-0013, this is how the z2m adapter (and future
+/// MQTT-speaking adapters like Z-Wave / 433-SDR) consume the broker
+/// without needing tokio + rumqttc inside the component.
+interface mqtt {
+    use types.{plugin-error, payload};
+
+    /// Register interest in an MQTT topic filter. Inbound messages
+    /// matching the filter dispatch to `runtime.on-mqtt-message`.
+    /// Capability check: `filter` must be covered (under MQTT wildcard
+    /// semantics) by one of `capabilities.mqtt.subscribe`.
+    subscribe: func(filter: string) -> result<_, plugin-error>;
+
+    /// Publish `payload` on `topic`. `retain` controls the MQTT retain
+    /// flag (usually false; true for last-known-state semantics).
+    /// Capability check: `topic` must match one of
+    /// `capabilities.mqtt.publish`.
+    publish: func(
+        topic: string,
+        payload: payload,
+        retain: bool,
+    ) -> result<_, plugin-error>;
+}
+
 /// Exports a plugin must implement.
 ///
 /// Grouping under an interface (rather than leaving as world-level free
@@ -72,11 +100,20 @@ interface runtime {
         iot-type: string,
         payload: payload,
     ) -> result<_, plugin-error>;
+
+    /// Called on every incoming MQTT message whose topic matches a
+    /// filter the plugin registered via `mqtt.subscribe`. Added in
+    /// 1.1.0 (ADR-0013).
+    on-mqtt-message: func(
+        topic: string,
+        payload: payload,
+    ) -> result<_, plugin-error>;
 }
 
 /// The world a plugin imports from + exports to the host.
 world plugin {
     import bus;
     import log;
+    import mqtt;
     export runtime;
 }

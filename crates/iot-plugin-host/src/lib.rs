@@ -116,6 +116,11 @@ pub async fn load_plugin(
         |s| s,
     )
     .context("link log host")?;
+    crate::component::iot::plugin_host::mqtt::add_to_linker::<_, HasSelf<PluginState>>(
+        &mut linker,
+        |s| s,
+    )
+    .context("link mqtt host")?;
 
     let state = PluginState {
         id: plugin_id.to_owned(),

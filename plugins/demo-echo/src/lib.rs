@@ -30,6 +30,12 @@ impl Guest for Component {
         let echo_subject = format!("{subject}.echo");
         bus::publish(&echo_subject, &iot_type, &payload)
     }
+
+    /// demo-echo doesn't speak MQTT, but the 1.1.0 ABI requires the
+    /// export. No-op returns Ok.
+    fn on_mqtt_message(_topic: String, _payload: Payload) -> Result<(), PluginError> {
+        Ok(())
+    }
 }
 
 iot_plugin_sdk_rust::export_plugin!(Component with_types_in iot_plugin_sdk_rust);

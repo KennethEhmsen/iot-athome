@@ -1,10 +1,17 @@
-//! Host-side bindings for the `iot:plugin-host@1.0.0` WIT world.
+//! Host-side bindings for the `iot:plugin-host@1.1.0` WIT world.
 //!
 //! `wasmtime::component::bindgen!` generates:
 //!  * A `Plugin` type wrapping an instantiated component.
-//!  * Host traits on the generated `bus::Host` + `log::Host` — implemented
-//!    below on [`PluginState`].
-//!  * `call_runtime_init` / `call_runtime_on_message` accessors.
+//!  * Host traits on the generated `bus::Host` + `log::Host` + `mqtt::Host` —
+//!    implemented below on [`PluginState`].
+//!  * `call_runtime_init` / `call_runtime_on_message` / `call_runtime_on_mqtt_message`
+//!    accessors.
+//!
+//! 1.1.0 adds the `mqtt` interface + `on-mqtt-message` export per
+//! [ADR-0013](../../../docs/adr/0013-zigbee2mqtt-wasm-migration.md). The
+//! actual broker connection + inbound-dispatch loop lives in a separate
+//! `mqtt` module (not yet in this commit — the host impl here is
+//! capability-check-only and returns "no broker wired" for publish).
 
 #![allow(
     clippy::all,
@@ -165,5 +172,82 @@ impl crate::component::iot::plugin_host::log::Host for PluginState {
             L::Warn => warn!(plugin, target = %target, "{message}"),
             L::Error => error!(plugin, target = %target, "{message}"),
         }
+    }
+}
+
+// ---------- mqtt host impl ----------
+//
+// Capability enforcement lives here; broker ownership (rumqttc client +
+// dispatcher loop) lands in a follow-up commit (`src/mqtt.rs`). Until
+// then `publish` is a dry-run, and `subscribe` records the intent via
+// an audit entry but doesn't wire an actual dispatch. Plugins calling
+// these functions still get the full capability-denied path if their
+// manifest doesn't allow-list the topic — the security boundary is in
+// place even without the broker wiring.
+
+impl crate::component::iot::plugin_host::mqtt::Host for PluginState {
+    #[tracing::instrument(
+        name = "host_call",
+        skip(self),
+        fields(
+            plugin = %self.id,
+            capability = "mqtt.subscribe",
+            filter = %filter,
+        ),
+    )]
+    async fn subscribe(&mut self, filter: String) -> Result<(), PluginError> {
+        if let Err(d) = self.capabilities.check_mqtt_subscribe(&filter) {
+            warn!(reason = d.code, "capability.denied");
+            record_denied(
+                self.audit.clone(),
+                self.id.clone(),
+                filter.clone(),
+                d.code.to_string(),
+            )
+            .await;
+            return Err(PluginError {
+                code: d.code.to_string(),
+                message: d.message,
+            });
+        }
+        // Broker wiring arrives next commit; for now we log the intent
+        // so the capability path is end-to-end testable.
+        info!("mqtt.subscribe (broker dispatcher not wired yet — intent recorded)");
+        Ok(())
+    }
+
+    #[tracing::instrument(
+        name = "host_call",
+        skip(self, payload),
+        fields(
+            plugin = %self.id,
+            capability = "mqtt.publish",
+            topic = %topic,
+            retain,
+            bytes = payload.len(),
+        ),
+    )]
+    async fn publish(
+        &mut self,
+        topic: String,
+        payload: Vec<u8>,
+        retain: bool,
+    ) -> Result<(), PluginError> {
+        if let Err(d) = self.capabilities.check_mqtt_publish(&topic) {
+            warn!(reason = d.code, "capability.denied");
+            record_denied(
+                self.audit.clone(),
+                self.id.clone(),
+                topic.clone(),
+                d.code.to_string(),
+            )
+            .await;
+            return Err(PluginError {
+                code: d.code.to_string(),
+                message: d.message,
+            });
+        }
+        debug!(retain, "mqtt.publish (broker not wired yet — dry run)");
+        Ok(())
     }
 }
