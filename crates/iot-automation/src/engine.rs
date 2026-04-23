@@ -17,42 +17,82 @@
 //!            Log     → tracing::{info,warn,error,…}
 //! ```
 //!
-//! Deliberately-deferred until W2.3:
+//! Hooks now covered (M3 W2 engine-polish slice):
 //!
-//! * Idempotency cache (short-lived `(rule_id, subject,
-//!   payload_hash)` dedupe).
-//! * DLQ on action failure.
-//! * Audit entry per firing.
+//! * Idempotency cache. A rolling `(rule_id, subject, payload_sha256)`
+//!   set with a 5-second TTL gates duplicate firings — chatty sensors
+//!   that publish the same payload multiple times per second don't
+//!   re-fire the same action. Entries prune on every check.
+//! * Audit entry per firing. When a rule fires, the engine appends a
+//!   `"automation.rule_fired"` entry carrying rule id, trigger
+//!   subject, action count, and the hash-truncated idempotency key.
+//!   The M1/M2 hash-chain plus the W1.4 JCS canonicalisation keeps
+//!   this tamper-detectable.
+//! * DLQ on action failure. If `fire()` returns `Err`, the engine
+//!   publishes a JSON failure record on `sys.automation.dlq` so
+//!   operators can watch that subject to catch failures without
+//!   scraping logs.
+//!
+//! Still deferred (no structural blocker — drop-in hooks):
+//!
 //! * Fancier action types (shell, http call, …).
-//!
-//! Keeping those out of this slice preserves the "pure dispatch" seam:
-//! W2.2 ships subscribe + match + eval + emit, and each follow-up
-//! drops into a named hook without restructuring.
+//! * Per-rule fine-grained bus subscriptions (M3's single
+//!   `device.>` subscription fans out in-process; cheap for
+//!   dozens of rules).
+//! * Proto→JSON decode of `iot.device.v1.EntityState` payloads so
+//!   existing z2m state messages are rule-visible. Hook in
+//!   `decode_payload`.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
+use iot_audit::AuditLog;
 use iot_bus::Bus;
 use tracing::{debug, info, warn};
 
 use crate::expr::eval_bool;
 use crate::rule::{RawAction, Rule};
 
+/// How long the idempotency cache remembers a `(rule, subject,
+/// payload_hash)` key. 5 s matches the zigbee2mqtt / typical sensor
+/// chat rate — two identical payloads landing within this window
+/// count as one firing.
+const IDEMPOTENCY_TTL: Duration = Duration::from_secs(5);
+
+/// NATS subject the engine publishes failure records to. Operators
+/// can `nats sub sys.automation.dlq` to catch every action that
+/// refused to emit without scraping logs.
+const DLQ_SUBJECT: &str = "sys.automation.dlq";
+
 /// Runtime handle to an instantiated engine.
 #[derive(Debug, Clone)]
 pub struct Engine {
     rules: Arc<Vec<Rule>>,
     bus: Bus,
+    audit: Option<Arc<AuditLog>>,
+    idempotency: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 impl Engine {
     /// Build from an already-compiled rule set + a live bus handle.
     #[must_use]
     pub fn new(rules: Vec<Rule>, bus: Bus) -> Self {
+        Self::with_audit(rules, bus, None)
+    }
+
+    /// Build with an optional audit log. In-process tests pass
+    /// `None`; real deployments wire the shared `iot-audit` handle
+    /// so every firing shows up in the hash chain.
+    #[must_use]
+    pub fn with_audit(rules: Vec<Rule>, bus: Bus, audit: Option<Arc<AuditLog>>) -> Self {
         Self {
             rules: Arc::new(rules),
             bus,
+            audit,
+            idempotency: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -94,9 +134,22 @@ impl Engine {
             }
             match eval_bool(&rule.when, &payload) {
                 Ok(true) => {
+                    // Short-circuit on idempotency: same rule, same
+                    // subject, same payload bytes within the TTL count
+                    // as one firing.
+                    let key = idempotency_key(&rule.id, subject, payload_bytes);
+                    if !self.claim_idempotency(&key) {
+                        debug!(rule = %rule.id, subject, "duplicate within idempotency window, skipping");
+                        continue;
+                    }
                     debug!(rule = %rule.id, subject, "rule matched");
-                    if let Err(e) = self.fire(rule, subject, &payload).await {
-                        warn!(rule = %rule.id, error = %format!("{e:#}"), "action dispatch failed");
+                    match self.fire(rule, subject, &payload).await {
+                        Ok(()) => self.record_firing(rule, subject, &key).await,
+                        Err(e) => {
+                            let reason = format!("{e:#}");
+                            warn!(rule = %rule.id, error = %reason, "action dispatch failed");
+                            self.dead_letter(rule, subject, &reason).await;
+                        }
                     }
                 }
                 Ok(false) => {
@@ -106,6 +159,60 @@ impl Engine {
                     warn!(rule = %rule.id, error = %e, "expression evaluation failed");
                 }
             }
+        }
+    }
+
+    /// Try to stake a claim on `key`. Returns `true` if the caller
+    /// should proceed to fire; `false` if another firing within the
+    /// TTL already beat us to it. Also prunes expired entries on the
+    /// way through.
+    fn claim_idempotency(&self, key: &str) -> bool {
+        #[allow(clippy::unwrap_used)] // Mutex is only poisoned on panic, which we'd surface.
+        let mut guard = self.idempotency.lock().unwrap();
+        let now = Instant::now();
+        // Prune first — keeps the map bounded in steady-state.
+        guard.retain(|_, t| now.duration_since(*t) < IDEMPOTENCY_TTL);
+        if guard.contains_key(key) {
+            return false;
+        }
+        guard.insert(key.to_owned(), now);
+        true
+    }
+
+    async fn record_firing(&self, rule: &Rule, trigger: &str, idempotency_key: &str) {
+        let Some(audit) = self.audit.clone() else {
+            return;
+        };
+        let payload = serde_json::json!({
+            "rule_id": rule.id,
+            "trigger_subject": trigger,
+            "action_count": rule.actions.len(),
+            // The idempotency key is SHA-256 hex; keep it grep-friendly
+            // by storing the truncated form alongside the rule id.
+            "idempotency": idempotency_key.get(..16).unwrap_or(idempotency_key),
+        });
+        if let Err(e) = audit.append("automation.rule_fired", payload).await {
+            warn!(rule = %rule.id, error = %e, "audit append failed");
+        }
+    }
+
+    async fn dead_letter(&self, rule: &Rule, trigger: &str, reason: &str) {
+        let record = serde_json::json!({
+            "rule_id": rule.id,
+            "trigger_subject": trigger,
+            "reason": reason,
+            "at_unix_ms": now_unix_ms(),
+        });
+        // Best-effort — if the bus is so broken we can't publish the
+        // DLQ, we've already logged at warn. Don't double-log.
+        match serde_json::to_vec(&record) {
+            Ok(bytes) => {
+                let _ = self
+                    .bus
+                    .publish_proto(DLQ_SUBJECT, "application/json", bytes, None)
+                    .await;
+            }
+            Err(e) => warn!(rule = %rule.id, error = %e, "serialise DLQ record failed"),
         }
     }
 
@@ -143,6 +250,34 @@ impl Engine {
         }
         Ok(())
     }
+}
+
+/// Stable idempotency key for a `(rule, subject, payload)` triple.
+/// SHA-256 of the concatenation; hex-encoded. The rule id + subject
+/// prefix the hash input so two rules with the same trigger + payload
+/// don't collide.
+fn idempotency_key(rule_id: &str, subject: &str, payload: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+    let mut h = Sha256::new();
+    h.update(rule_id.as_bytes());
+    h.update(b"|");
+    h.update(subject.as_bytes());
+    h.update(b"|");
+    h.update(payload);
+    let digest = h.finalize();
+    let mut out = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        let _ = std::fmt::write(&mut out, format_args!("{b:02x}"));
+    }
+    out
+}
+
+fn now_unix_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let dur = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    u64::try_from(dur.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Decode bus payload bytes into a form the expression evaluator can
@@ -259,4 +394,28 @@ mod tests {
     // exercise the publish step — we cover it with the testcontainers
     // integration test in W2.3 (`iotctl rule test`). The pieces above
     // (decode + template) are what's substantive-but-unit-testable.
+
+    // --------------------------------------------------- idempotency helpers
+
+    #[test]
+    fn idempotency_key_stable_across_identical_inputs() {
+        let a = idempotency_key("rule-x", "device.a.b.c.state", b"{}");
+        let b = idempotency_key("rule-x", "device.a.b.c.state", b"{}");
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 64, "SHA-256 hex = 64 chars");
+    }
+
+    #[test]
+    fn idempotency_key_differs_per_field() {
+        let base = idempotency_key("rule-x", "device.a.b.c.state", b"{}");
+        // Rule id differs.
+        let r = idempotency_key("rule-y", "device.a.b.c.state", b"{}");
+        assert_ne!(base, r);
+        // Subject differs.
+        let s = idempotency_key("rule-x", "device.a.b.d.state", b"{}");
+        assert_ne!(base, s);
+        // Payload differs.
+        let p = idempotency_key("rule-x", "device.a.b.c.state", br#"{"x":1}"#);
+        assert_ne!(base, p);
+    }
 }

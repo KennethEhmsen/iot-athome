@@ -19,6 +19,7 @@ path = "src/main.rs"
 iot-core = { path = "../iot-core" }
 iot-proto = { path = "../iot-proto" }
 iot-bus = { path = "../iot-bus" }
+iot-audit = { path = "../iot-audit" }
 iot-config = { path = "../iot-config" }
 iot-observability = { path = "../iot-observability" }
 
@@ -31,6 +32,8 @@ futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
+# Engine idempotency cache keys: rule_id + subject + payload hash.
+sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 tracing.workspace = true
