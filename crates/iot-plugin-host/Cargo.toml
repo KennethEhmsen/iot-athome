@@ -43,3 +43,6 @@ wasmtime-wasi.workspace = true
 [dev-dependencies]
 # Supervisor DLQ marker tests write into a temp dir.
 tempfile = "3.14"
+# Broker integration test spins a Mosquitto 2.x container with an
+# inline anonymous-enabling config.
+testcontainers.workspace = true
