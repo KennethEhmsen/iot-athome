@@ -1,62 +1,62 @@
 //! Bus publisher for per-entity state updates.
 //!
 //! Given a parsed zigbee2mqtt payload and the device's canonical ULID,
-//! publish one `iot.device.v1.EntityState` message per known entity on
-//! `device.zigbee2mqtt.<device_id_lc>.<key>.state`.
+//! emit one wire-compatible `iot.device.v1.EntityState` message per
+//! recognized entity on `device.zigbee2mqtt.<device_id_lc>.<key>.state`
+//! via the plugin host's `bus::publish` capability.
+//!
+//! Port of the M1 native module (`iot_bus::Bus::publish_proto`) onto
+//! the WASM plugin SDK. Logic identical; only the emit path changed.
 
-use iot_bus::Bus;
-use iot_proto::iot::common::v1::Ulid as PbUlid;
-use iot_proto::iot::device::v1::EntityState;
+use iot_plugin_sdk_rust::iot::plugin_host::bus;
+use iot_plugin_sdk_rust::iot::plugin_host::log;
 use prost::Message as _;
-use tracing::{instrument, warn};
 
+use crate::pb::{EntityState, Ulid, ENTITY_STATE_TYPE};
 use crate::translator::known_entity_keys;
 
-/// Published on `device.<plugin>.<id>.<entity>.state` per recognized key.
-#[instrument(skip(bus, payload))]
-pub async fn publish_all(
-    bus: &Bus,
-    device_id_uppercase: &str,
-    friendly: &str,
-    payload: &serde_json::Value,
-) {
-    let device_id_lc = device_id_uppercase.to_ascii_lowercase();
+/// Published on `device.<plugin>.<id>.<entity>.state` per recognised key.
+pub fn publish_all(device_id_ulid: &str, friendly: &str, payload: &serde_json::Value) {
+    let device_id_lc = device_id_ulid.to_ascii_lowercase();
     let Some(obj) = payload.as_object() else {
         return;
     };
 
     for key in known_entity_keys(obj.keys().map(String::as_str)) {
         let Some(value) = obj.get(&key) else { continue };
-        let subject = match iot_proto::subjects::device_state("zigbee2mqtt", &device_id_lc, &key) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(error = %e, device_id_lc, key, "bad subject");
-                continue;
-            }
-        };
+        let subject = format!("device.zigbee2mqtt.{device_id_lc}.{key}.state");
 
         let state = EntityState {
-            device_id: Some(PbUlid {
-                value: device_id_uppercase.to_owned(),
+            device_id: Some(Ulid {
+                value: device_id_ulid.to_owned(),
             }),
-            entity_id: Some(PbUlid {
+            entity_id: Some(Ulid {
                 value: format!("{friendly}::{key}"),
             }),
             value: Some(json_to_prost(value.clone())),
-            at: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
-            schema_version: iot_core::DEVICE_SCHEMA_VERSION,
+            at: Some(current_timestamp()),
+            schema_version: 1,
         };
 
         let bytes = state.encode_to_vec();
-        if let Err(e) = bus
-            .publish_proto(&subject, "iot.device.v1.EntityState", bytes, None)
-            .await
-        {
-            warn!(error = %e, subject, "bus publish failed");
+        match bus::publish(&subject, ENTITY_STATE_TYPE, &bytes) {
+            Ok(()) => {}
+            Err(e) => log::emit(
+                log::Level::Warn,
+                "zigbee2mqtt-adapter",
+                &format!(
+                    "bus.publish failed on {subject}: {}: {}",
+                    e.code, e.message
+                ),
+            ),
         }
     }
 }
 
+/// Convert a `serde_json::Value` into a `prost_types::Value`.
+///
+/// Protobuf's `google.protobuf.Value` is a tagged union that matches
+/// JSON's shape 1:1, so this is a straight structural translation.
 fn json_to_prost(v: serde_json::Value) -> prost_types::Value {
     use prost_types::value::Kind;
     let kind = match v {
@@ -75,4 +75,18 @@ fn json_to_prost(v: serde_json::Value) -> prost_types::Value {
         }),
     };
     prost_types::Value { kind: Some(kind) }
+}
+
+/// Current wall-clock time as a `prost_types::Timestamp`. Uses
+/// `SystemTime::now()` which is available on wasm32-wasip2 via the
+/// wasi:clocks interface (the preview adapter wires it up for us).
+fn current_timestamp() -> prost_types::Timestamp {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    prost_types::Timestamp {
+        seconds: i64::try_from(now.as_secs()).unwrap_or(0),
+        nanos: i32::try_from(now.subsec_nanos()).unwrap_or(0),
+    }
 }

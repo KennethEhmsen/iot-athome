@@ -13,9 +13,6 @@ members = [
   "crates/iot-observability",
   "crates/iot-config",
   "crates/iot-cli",
-  # M1-era adapters live under plugins/ but run as regular systemd services.
-  # They'll migrate to WASM components in M2 without changing their manifests.
-  "plugins/zigbee2mqtt-adapter",
 ]
 exclude = [
   "firmware/*",
@@ -26,6 +23,9 @@ exclude = [
   # their cdylib output. `cargo build` from the plugin directory (with
   # the target pinned in its own .cargo/config.toml) is the entry point.
   "plugins/demo-echo",
+  # z2m migrated from a native tokio sidecar (M1) to a WASM plugin
+  # against the host MQTT + registry capabilities (M2 W4, ADR-0013).
+  "plugins/zigbee2mqtt-adapter",
 ]
 
 [workspace.package]

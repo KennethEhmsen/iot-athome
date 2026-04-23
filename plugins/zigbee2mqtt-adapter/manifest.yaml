@@ -1,0 +1,50 @@
+# IoT-AtHome zigbee2mqtt adapter (WASM port of the M1 native adapter).
+#
+# Consumes every zigbee2mqtt/<friendly_name> MQTT message, upserts the
+# implied device in the registry, and publishes one EntityState per
+# recognized entity on `device.zigbee2mqtt.<id>.<entity>.state`.
+#
+# Supersedes ADR-0011's "single-NATS-account" arrangement once this
+# loads — the plugin gets its own nkey seed at install time (M2 W3).
+
+schema_version: 1
+id: zigbee2mqtt-adapter
+name: Zigbee2MQTT Adapter
+version: 0.2.0
+description: >
+  Bridges zigbee2mqtt MQTT traffic into canonical EntityState bus events.
+  Requires zigbee2mqtt running as a separate Node process publishing on
+  `zigbee2mqtt/<friendly_name>` — this adapter subscribes, translates,
+  and forwards.
+authors: ["IoT-AtHome"]
+license: "Apache-2.0 OR MIT"
+
+runtime: wasm-component
+abi:
+  world: iot:plugin-host
+  version: 1.2.0
+entrypoint: plugin.wasm
+
+capabilities:
+  mqtt:
+    subscribe:
+      - "zigbee2mqtt/+"
+  bus:
+    publish:
+      - "device.zigbee2mqtt.>"
+  registry:
+    upsert: true
+    list: true
+
+resources:
+  memory_mb_max: 64
+  cpu_pct_max: 10
+  fuel_max: 10000000
+
+signatures:
+  - mechanism: cosign-keyless
+    rekor_entry: "DEV-UNSIGNED"
+    identity: "dev@localhost"
+    issuer: "dev"
+
+sbom: sbom.cdx.json

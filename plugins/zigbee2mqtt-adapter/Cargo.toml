@@ -1,39 +1,29 @@
 [package]
 name = "zigbee2mqtt-adapter"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-repository.workspace = true
-publish.workspace = true
-description = "IoT-AtHome — adapter that bridges zigbee2mqtt MQTT traffic into canonical devices."
-
-[lints]
-workspace = true
+version = "0.1.0"
+edition = "2021"
+description = "IoT-AtHome — WASM plugin that bridges zigbee2mqtt MQTT traffic into canonical EntityState bus messages."
+publish = false
 
 [lib]
-path = "src/lib.rs"
+crate-type = ["cdylib"]
 
-[[bin]]
-name = "zigbee2mqtt-adapter"
-path = "src/main.rs"
+# Built from this dir, target pinned in .cargo/config.toml to wasm32-wasip2.
+# Not a workspace member — see root Cargo.toml `exclude` list.
 
 [dependencies]
-iot-core = { path = "../../crates/iot-core" }
-iot-proto = { path = "../../crates/iot-proto" }
-iot-bus = { path = "../../crates/iot-bus" }
-iot-config = { path = "../../crates/iot-config" }
-iot-observability = { path = "../../crates/iot-observability" }
+iot-plugin-sdk-rust = { path = "../../crates/iot-plugin-sdk-rust" }
 
-anyhow.workspace = true
-chrono.workspace = true
-futures.workspace = true
-prost.workspace = true
-prost-types.workspace = true
-rumqttc.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "net", "fs"] }
-tonic.workspace = true
-tracing.workspace = true
+# Minimal protobuf encode of `iot.device.v1.EntityState` — the iot-proto
+# crate can't build for wasm32-wasip2 (pulls tonic → hyper → native socket
+# APIs), so the plugin defines the wire-compatible subset inline. Field
+# tags match `schemas/iot/device/v1/entity_event.proto` exactly.
+prost = { version = "0.13", default-features = false, features = ["derive"] }
+prost-types = { version = "0.13", default-features = false, features = ["std"] }
+
+# JSON parsing for incoming MQTT payloads.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[package.metadata.component]
+package = "iot:zigbee2mqtt-adapter"
