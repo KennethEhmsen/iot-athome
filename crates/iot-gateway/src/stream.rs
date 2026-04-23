@@ -97,6 +97,37 @@ async fn handle_socket(mut socket: WebSocket, topics: String, state: AppState) {
     };
     info!(topics, "ws client subscribed");
 
+    // Panel-survives-reload (M3 W2.5): if the subscription targets a
+    // concrete subject (no wildcards), replay the last retained
+    // message from the DEVICE_STATE JetStream first. Panel sees the
+    // current value within one RTT of connect; live updates flow
+    // afterwards via the core subscription.
+    //
+    // Wildcard patterns (`device.>` or `device.*.foo.bar.state`) get
+    // no replay here — the broader "last-per-subject across a filter"
+    // path wants a JetStream ephemeral consumer with
+    // DeliverLastPerSubject, which is the next slice.
+    if !topics.contains('*') && !topics.contains('>') {
+        match bus.last_state(&topics).await {
+            Ok(Some(payload)) => {
+                // We don't have the original iot-type header in the
+                // retained message via the raw-get API. For the M3
+                // shape-event path `shape_event` only cares about the
+                // payload bytes when iot-type matches
+                // `iot.device.v1.EntityState`; otherwise it passes
+                // the subject through. Best-effort: try as EntityState.
+                let event = shape_event(&topics, "iot.device.v1.EntityState", &payload);
+                if send_text(&mut socket, event.to_string()).await.is_err() {
+                    debug!("client dropped during replay");
+                    return;
+                }
+                debug!(topics = %topics, "replayed last-known state");
+            }
+            Ok(None) => debug!(topics = %topics, "no retained state to replay"),
+            Err(e) => warn!(topics = %topics, error = %format!("{e:#}"), "replay fetch failed"),
+        }
+    }
+
     loop {
         tokio::select! {
             msg = sub.next() => {
