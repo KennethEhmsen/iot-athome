@@ -15,3 +15,7 @@ workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 thiserror.workspace = true
+# M3 W2.4 traceparent generation — OS randomness for trace / span IDs.
+# getrandom is already transitive via many other deps; pinning as a
+# direct dep so the fallback feature set stays under our control.
+getrandom = "0.2"

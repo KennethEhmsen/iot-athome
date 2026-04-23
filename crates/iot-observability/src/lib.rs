@@ -9,6 +9,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod traceparent;
+
 use thiserror::Error;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
