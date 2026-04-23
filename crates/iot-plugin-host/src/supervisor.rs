@@ -138,7 +138,9 @@ pub fn backoff(count: usize, base: Duration, cap: Duration) -> Duration {
     // count starts at 1 after the first crash; shift left by (count-1).
     // Clamp to 30 so `1u32 << shift` never overflows (2^30 = ~1 Gs backoff,
     // far past any reasonable cap).
-    let shift = u32::try_from(count.saturating_sub(1)).unwrap_or(u32::MAX).min(30);
+    let shift = u32::try_from(count.saturating_sub(1))
+        .unwrap_or(u32::MAX)
+        .min(30);
     let multiplier = 1u32.checked_shl(shift).unwrap_or(u32::MAX);
     let candidate = base.saturating_mul(multiplier);
     candidate.min(cap)
