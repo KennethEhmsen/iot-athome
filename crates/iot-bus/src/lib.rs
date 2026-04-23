@@ -12,6 +12,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod jetstream;
 pub mod jwt;
 
 use async_nats::HeaderMap;

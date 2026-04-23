@@ -1,0 +1,168 @@
+//! JetStream helpers (M3 W2.5).
+//!
+//! Two narrow utilities on top of `async_nats::jetstream`:
+//!
+//! 1. [`ensure_device_state_stream`] — idempotently creates the
+//!    `DEVICE_STATE` stream that holds the last message per
+//!    `device.*.*.*.state` subject. The panel survives reload because
+//!    this stream replays last-known values on first connect.
+//! 2. [`last_state`] — fetches the last retained message on a single
+//!    subject. Callable from the gateway's WebSocket handler when a
+//!    client subscribes: emit the replayed value immediately, then
+//!    stream live updates from the core subscription.
+//!
+//! Commands (`cmd.>`) explicitly do NOT land on a stream — replaying
+//! them would re-issue actions on reconnect, which is user-visible
+//! foot-destruction. Only state.
+
+use async_nats::jetstream::stream;
+
+use crate::Bus;
+
+/// Stream name + subject filter. Kept as constants so consumers
+/// elsewhere (iot-gateway, iotctl diagnostics) agree on the naming.
+pub const DEVICE_STATE_STREAM: &str = "DEVICE_STATE";
+pub const DEVICE_STATE_SUBJECT: &str = "device.>";
+
+impl Bus {
+    /// Idempotently create (or upgrade) the `DEVICE_STATE` stream.
+    /// Safe to call on every process start — `get_or_create_stream`
+    /// is a no-op when the stream already exists with a matching
+    /// config.
+    ///
+    /// # Errors
+    /// Propagates `async_nats::jetstream` errors (network failure, or
+    /// an existing stream whose config conflicts and can't be
+    /// reconciled).
+    pub async fn ensure_device_state_stream(&self) -> Result<(), JetstreamError> {
+        let ctx = async_nats::jetstream::new(self.raw().clone());
+        let config = stream::Config {
+            name: DEVICE_STATE_STREAM.to_owned(),
+            subjects: vec![DEVICE_STATE_SUBJECT.to_owned()],
+            retention: stream::RetentionPolicy::Limits,
+            // One message per subject — the point of the stream is
+            // "what's the last known state" not "history of every
+            // change" (that'd be TimescaleDB in M3 W3).
+            max_messages_per_subject: 1,
+            storage: stream::StorageType::File,
+            discard: stream::DiscardPolicy::Old,
+            ..stream::Config::default()
+        };
+        ctx.get_or_create_stream(config).await?;
+        tracing::info!(
+            stream = DEVICE_STATE_STREAM,
+            filter = DEVICE_STATE_SUBJECT,
+            "JetStream stream ensured"
+        );
+        Ok(())
+    }
+
+    /// Fetch the last retained message on `subject` from the
+    /// `DEVICE_STATE` stream. Returns `Ok(None)` when there is no
+    /// message for that subject (fresh installs, post-purge).
+    ///
+    /// # Errors
+    /// `NoStream` if the stream isn't present (run
+    /// `ensure_device_state_stream` first). Other variants wrap
+    /// transport / server errors.
+    pub async fn last_state(&self, subject: &str) -> Result<Option<Vec<u8>>, JetstreamError> {
+        let ctx = async_nats::jetstream::new(self.raw().clone());
+        let s = ctx.get_stream(DEVICE_STATE_STREAM).await?;
+        match s.get_last_raw_message_by_subject(subject).await {
+            Ok(msg) => Ok(Some(msg.payload.to_vec())),
+            // The crate surfaces "no message found" as an error kind —
+            // translate to None so callers can cleanly distinguish
+            // "brand-new subject, nothing to replay" from a real fault.
+            Err(e) if is_no_message(&e) => Ok(None),
+            Err(e) => Err(JetstreamError::LastMsg(e.to_string())),
+        }
+    }
+}
+
+/// Public thin wrapper around `async_nats::jetstream` errors.
+///
+/// The crate's own error types are variant-heavy and exposing them
+/// directly would pull `jetstream::context::ErrorKind` into every
+/// downstream match.
+#[derive(Debug, thiserror::Error)]
+pub enum JetstreamError {
+    #[error("get_or_create_stream: {0}")]
+    CreateOrGet(String),
+    #[error("get_stream: {0}")]
+    GetStream(String),
+    #[error("get_last_msg: {0}")]
+    LastMsg(String),
+}
+
+impl From<async_nats::jetstream::context::CreateStreamError> for JetstreamError {
+    fn from(e: async_nats::jetstream::context::CreateStreamError) -> Self {
+        Self::CreateOrGet(e.to_string())
+    }
+}
+
+impl From<async_nats::jetstream::context::GetStreamError> for JetstreamError {
+    fn from(e: async_nats::jetstream::context::GetStreamError) -> Self {
+        Self::GetStream(e.to_string())
+    }
+}
+
+/// Heuristic for "no retained message for this subject". The crate's
+/// error types bubble up the NATS server's `{ code: 404, err_code:
+/// 10037 }` as a string; rather than depend on unstable error-enum
+/// variants we match the error's Display form.
+fn is_no_message(e: &impl std::fmt::Display) -> bool {
+    let msg = e.to_string().to_ascii_lowercase();
+    msg.contains("no message found") || msg.contains("10037")
+}
+
+/// Build a per-device state subject string from its parts.
+///
+/// Exposed as a helper so the gateway can convert a panel
+/// subscription (integration + device ULID + entity) into the exact
+/// retained-message key without duplicating the format string.
+/// Expressed as a function rather than a const template so any
+/// future subject-shape change happens here + the tests catch
+/// regressions.
+#[must_use]
+pub fn device_state_subject(plugin: &str, device_id_lc: &str, entity: &str) -> String {
+    format!("device.{plugin}.{device_id_lc}.{entity}.state")
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    // The live stream-lifecycle tests require a NATS container; they
+    // live in the integration suite (W2.5b). This module's unit tests
+    // just cover the pure helpers.
+
+    #[test]
+    fn constants_match_nats_filter_shape() {
+        // The subject filter ends with `>` (NATS multi-wildcard) so
+        // the stream captures every subject under `device.`.
+        assert!(DEVICE_STATE_SUBJECT.ends_with('>'));
+    }
+
+    #[test]
+    fn device_state_subject_shape() {
+        assert_eq!(
+            device_state_subject("zigbee2mqtt", "01hxx", "temperature"),
+            "device.zigbee2mqtt.01hxx.temperature.state"
+        );
+    }
+
+    #[test]
+    fn is_no_message_matches_nats_phrasing() {
+        struct Stub(&'static str);
+        impl std::fmt::Display for Stub {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.0)
+            }
+        }
+        assert!(is_no_message(&Stub("no message found")));
+        assert!(is_no_message(&Stub("server error 10037: no message")));
+        assert!(!is_no_message(&Stub("stream not found")));
+        assert!(!is_no_message(&Stub("connection refused")));
+    }
+}
