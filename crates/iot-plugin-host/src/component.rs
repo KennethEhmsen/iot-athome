@@ -48,11 +48,12 @@ pub struct PluginState {
     pub capabilities: CapabilityMap,
     pub bus: Option<Bus>,
     pub audit: Option<Arc<AuditLog>>,
-    /// Shared MQTT routing table. `mqtt::subscribe` host calls register
-    /// here; inbound broker messages fan out to the plugins whose
-    /// filters match. `None` when the host was built without MQTT
-    /// support (most unit tests).
-    pub mqtt: Option<crate::mqtt::MqttRouter>,
+    /// Shared MQTT broker handle. `mqtt::subscribe` host calls register
+    /// with the broker's router + subscribe to the underlying filter;
+    /// `mqtt::publish` goes straight through the broker's client.
+    /// `None` when the host was built without MQTT support (most unit
+    /// tests).
+    pub mqtt: Option<Arc<crate::mqtt::MqttBroker>>,
     /// This plugin's own mailbox, used when registering with
     /// `MqttRouter` so inbound messages route back to us. Filled in by
     /// [`crate::runtime::spawn_plugin_task`] after the mpsc channel
@@ -221,17 +222,29 @@ impl crate::component::iot::plugin_host::mqtt::Host for PluginState {
                 message: d.message,
             });
         }
-        // Register with the router if both pieces are wired. Tests and
-        // the demo-echo roundtrip don't go through the runtime task
-        // (no self_tx) or don't hook up an MQTT router (no mqtt) — in
-        // both cases the capability path is still enforced; the
-        // registration just becomes a no-op.
+        // Register with the router + tell the broker to subscribe.
+        // Both pieces need to be wired — tests and the demo-echo
+        // roundtrip don't have a broker (or a runtime task) hooked up,
+        // so they fall through to the intent-only branch and the
+        // capability check remains the enforced gate.
         match (self.mqtt.as_ref(), self.self_tx.as_ref()) {
-            (Some(router), Some(tx)) => {
-                router.register(self.id.clone(), filter.clone(), tx.clone());
-                info!("mqtt.subscribe registered");
+            (Some(broker), Some(tx)) => {
+                broker
+                    .router()
+                    .register(self.id.clone(), filter.clone(), tx.clone());
+                if let Err(e) = broker.subscribe_filter(&filter).await {
+                    // Broker-side subscribe failed (channel full etc.).
+                    // Capability check already said yes and the router
+                    // registration landed — surface as a PluginError
+                    // so the plugin can decide to retry.
+                    return Err(PluginError {
+                        code: "mqtt.broker_subscribe_failed".into(),
+                        message: format!("{e:#}"),
+                    });
+                }
+                info!("mqtt.subscribe registered + broker subscribed");
             }
-            _ => info!("mqtt.subscribe (router not wired — intent recorded)"),
+            _ => info!("mqtt.subscribe (broker not wired — intent recorded)"),
         }
         Ok(())
     }
@@ -267,7 +280,16 @@ impl crate::component::iot::plugin_host::mqtt::Host for PluginState {
                 message: d.message,
             });
         }
-        debug!(retain, "mqtt.publish (broker not wired yet — dry run)");
-        Ok(())
+        let Some(broker) = self.mqtt.clone() else {
+            debug!(retain, "mqtt.publish (no broker configured — dry run)");
+            return Ok(());
+        };
+        broker
+            .publish(&topic, &payload, retain)
+            .await
+            .map_err(|e| PluginError {
+                code: "mqtt.publish_failed".into(),
+                message: format!("{e:#}"),
+            })
     }
 }

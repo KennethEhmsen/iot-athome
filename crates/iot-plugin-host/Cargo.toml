@@ -25,6 +25,9 @@ iot-observability = { path = "../iot-observability" }
 
 anyhow.workspace = true
 async-trait.workspace = true
+# Host owns the one MQTT broker connection per process and fans out
+# inbound messages to plugins via MqttRouter. See ADR-0013.
+rumqttc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true

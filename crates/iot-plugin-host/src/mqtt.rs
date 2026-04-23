@@ -23,8 +23,15 @@
 //!                          PluginTask (owns Store)
 //! ```
 
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
+use anyhow::{Context as _, Result};
+use rumqttc::{
+    AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS, TlsConfiguration, Transport,
+};
+use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use crate::capabilities::matches_mqtt_topic;
@@ -151,6 +158,162 @@ impl MqttRouter {
     }
 }
 
+// ---------------------------------------------------------- broker bridge
+
+/// mTLS material for an MQTT broker connection. Matches the three-file
+/// layout the dev CA mint script produces (`just certs`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct MqttTlsConfig {
+    pub ca: PathBuf,
+    pub cert: PathBuf,
+    pub key: PathBuf,
+}
+
+/// Per-process MQTT broker configuration. All fields default-off so a
+/// host without any MQTT plugins pays nothing.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MqttBrokerConfig {
+    pub host: String,
+    #[serde(default = "default_port")]
+    pub port: u16,
+    #[serde(default = "default_client_id")]
+    pub client_id: String,
+    /// Enables `Transport::Tls` with the given certificate material.
+    /// Omit for plaintext localhost dev; always populate for real
+    /// deployments (ADR-0006).
+    #[serde(default)]
+    pub tls: Option<MqttTlsConfig>,
+}
+
+const fn default_port() -> u16 {
+    8884
+}
+fn default_client_id() -> String {
+    "iot-plugin-host".into()
+}
+
+/// A connected MQTT broker — owns the `rumqttc::AsyncClient` for
+/// outbound publishes + subscribes, plus an [`MqttRouter`] that the
+/// eventloop task feeds with inbound messages.
+///
+/// Cheap to clone the `Arc<MqttBroker>` handle; the broker itself is
+/// a singleton per host process.
+#[derive(Debug)]
+pub struct MqttBroker {
+    client: AsyncClient,
+    router: MqttRouter,
+}
+
+impl MqttBroker {
+    /// Connect to the broker, spawn the eventloop task, return an
+    /// `Arc<MqttBroker>` ready for plugins to use.
+    ///
+    /// The eventloop task runs forever, dispatching every inbound
+    /// `Publish` event through `router.dispatch(topic, payload)`. On
+    /// protocol errors it logs and reconnects after a 2 s back-off —
+    /// matching what the M1 z2m adapter did standalone.
+    ///
+    /// # Errors
+    /// Returns on invalid TLS material (cert files missing / malformed)
+    /// or socket-level issues rumqttc surfaces at construction. The
+    /// actual broker handshake happens asynchronously inside the
+    /// eventloop task, so a wrong password won't show up here — watch
+    /// the task's `mqtt eventloop error` logs.
+    //
+    // Not actually async today — rumqttc's `AsyncClient::new` is
+    // synchronous and the handshake is deferred into the eventloop.
+    // Keeping the `async` keyword preserves the call-site shape
+    // (`.await`-ready for future versions that *do* need to wait for
+    // ConnAck before returning), which is cheap and means the z2m
+    // migration doesn't have to touch this line twice.
+    #[allow(clippy::unused_async)]
+    pub async fn connect(cfg: MqttBrokerConfig, router: MqttRouter) -> Result<Arc<Self>> {
+        let opts = mqtt_options(&cfg).context("build MQTT options")?;
+        let (client, eventloop) = AsyncClient::new(opts, 64);
+        spawn_eventloop(eventloop, router.clone());
+        Ok(Arc::new(Self { client, router }))
+    }
+
+    /// Router handle for plugins calling `mqtt::subscribe` — they
+    /// register their mailbox with the router, the broker subscribes
+    /// the underlying filter so inbound messages actually arrive.
+    #[must_use]
+    pub fn router(&self) -> &MqttRouter {
+        &self.router
+    }
+
+    /// Tell the broker to forward messages matching `filter` to us.
+    /// Plugin-side capability + router registration happens *before*
+    /// this call inside `mqtt::Host::subscribe`; this method is the
+    /// last link in the chain.
+    ///
+    /// Duplicate subscriptions are broker-side no-ops — we don't
+    /// dedupe on the host side for simplicity.
+    ///
+    /// # Errors
+    /// Propagates `rumqttc::ClientError` — channel-full or shutting
+    /// down conditions on the AsyncClient's request queue.
+    pub async fn subscribe_filter(&self, filter: &str) -> Result<()> {
+        self.client
+            .subscribe(filter, QoS::AtLeastOnce)
+            .await
+            .with_context(|| format!("broker subscribe {filter}"))
+    }
+
+    /// Publish on the broker at QoS 1.
+    ///
+    /// # Errors
+    /// Propagates `rumqttc::ClientError` (same conditions as above).
+    pub async fn publish(&self, topic: &str, payload: &[u8], retain: bool) -> Result<()> {
+        self.client
+            .publish(topic, QoS::AtLeastOnce, retain, payload.to_vec())
+            .await
+            .with_context(|| format!("broker publish {topic}"))
+    }
+}
+
+fn mqtt_options(cfg: &MqttBrokerConfig) -> Result<MqttOptions> {
+    let mut opts = MqttOptions::new(&cfg.client_id, &cfg.host, cfg.port);
+    opts.set_keep_alive(Duration::from_secs(30));
+    if let Some(tls) = &cfg.tls {
+        let ca =
+            std::fs::read(&tls.ca).with_context(|| format!("read MQTT CA {}", tls.ca.display()))?;
+        let cert = std::fs::read(&tls.cert)
+            .with_context(|| format!("read MQTT cert {}", tls.cert.display()))?;
+        let key = std::fs::read(&tls.key)
+            .with_context(|| format!("read MQTT key {}", tls.key.display()))?;
+        opts.set_transport(Transport::Tls(TlsConfiguration::Simple {
+            ca,
+            alpn: None,
+            client_auth: Some((cert, key)),
+        }));
+    }
+    Ok(opts)
+}
+
+/// Detached task that owns the rumqttc `EventLoop` and routes inbound
+/// messages into the shared `MqttRouter`. Reconnects after transient
+/// errors with a 2 s backoff.
+fn spawn_eventloop(mut eventloop: EventLoop, router: MqttRouter) {
+    tokio::spawn(async move {
+        loop {
+            match eventloop.poll().await {
+                Ok(Event::Incoming(Packet::Publish(p))) => {
+                    router.dispatch(&p.topic, &p.payload).await;
+                }
+                Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                    tracing::info!("mqtt broker connected");
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::error!(error = %e, "mqtt eventloop error — retrying in 2s");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
@@ -265,5 +428,56 @@ mod tests {
 
         router.unregister("p1");
         assert_eq!(router.len(), 1);
+    }
+
+    // -------------------------------------------------------- broker config
+
+    #[test]
+    fn mqtt_options_plaintext_when_no_tls() {
+        let cfg = MqttBrokerConfig {
+            host: "127.0.0.1".into(),
+            port: 1883,
+            client_id: "test".into(),
+            tls: None,
+        };
+        // Should build without reading any cert files.
+        let _ = mqtt_options(&cfg).expect("opts");
+    }
+
+    #[test]
+    fn mqtt_options_reads_tls_material() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = dir.path().join("ca.crt");
+        let cert = dir.path().join("client.crt");
+        let key = dir.path().join("client.key");
+        std::fs::write(&ca, b"-----BEGIN CERTIFICATE-----\n").unwrap();
+        std::fs::write(&cert, b"-----BEGIN CERTIFICATE-----\n").unwrap();
+        std::fs::write(&key, b"-----BEGIN PRIVATE KEY-----\n").unwrap();
+
+        let cfg = MqttBrokerConfig {
+            host: "mosquitto.iot.local".into(),
+            port: 8884,
+            client_id: "iot-plugin-host".into(),
+            tls: Some(MqttTlsConfig { ca, cert, key }),
+        };
+        // Builds; actual TLS validation happens at connect-time inside
+        // rumqttc's eventloop, which is beyond this unit's scope.
+        let _ = mqtt_options(&cfg).expect("tls opts");
+    }
+
+    #[test]
+    fn mqtt_options_surfaces_missing_tls_file() {
+        let cfg = MqttBrokerConfig {
+            host: "mosquitto.iot.local".into(),
+            port: 8884,
+            client_id: "iot-plugin-host".into(),
+            tls: Some(MqttTlsConfig {
+                ca: "/does/not/exist/ca.crt".into(),
+                cert: "/nope/client.crt".into(),
+                key: "/nope/client.key".into(),
+            }),
+        };
+        let err = mqtt_options(&cfg).unwrap_err();
+        assert!(format!("{err:#}").contains("read MQTT"), "got: {err:#}");
     }
 }

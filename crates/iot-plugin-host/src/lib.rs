@@ -47,10 +47,12 @@ fn default_plugin_dir() -> String {
 pub struct HostBindings {
     pub bus: Option<Bus>,
     pub audit: Option<Arc<AuditLog>>,
-    /// Shared MQTT router (per-host-process). `mqtt::subscribe` host
-    /// calls register here; the broker dispatcher (next commit) feeds
-    /// inbound messages into `MqttRouter::dispatch`.
-    pub mqtt: Option<crate::mqtt::MqttRouter>,
+    /// Shared MQTT broker handle (per-host-process) — owns the rumqttc
+    /// client and the `MqttRouter` that fans inbound messages out to
+    /// plugins. Construct via `MqttBroker::connect(...)` at host
+    /// startup; pass a clone of the `Arc` into every `load_plugin_dir`
+    /// call.
+    pub mqtt: Option<Arc<crate::mqtt::MqttBroker>>,
 }
 
 /// Construct a Wasmtime Engine preconfigured for the Component Model + async

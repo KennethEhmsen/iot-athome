@@ -244,8 +244,8 @@ pub async fn supervise(engine: Engine, install_dir: PathBuf, bindings: HostBindi
         // Flush any MQTT router registrations this incarnation left
         // behind. On restart we'll register fresh; without this, stale
         // entries hold a dead tx and get pruned lazily on next dispatch.
-        if let Some(router) = bindings.mqtt.as_ref() {
-            router.unregister(&id);
+        if let Some(broker) = bindings.mqtt.as_ref() {
+            broker.router().unregister(&id);
         }
 
         match outcome {

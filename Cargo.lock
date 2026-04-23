@@ -2173,6 +2173,7 @@ dependencies = [
  "iot-core",
  "iot-observability",
  "iot-proto",
+ "rumqttc",
  "serde",
  "serde_json",
  "serde_yaml",
