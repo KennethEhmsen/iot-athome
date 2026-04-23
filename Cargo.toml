@@ -117,6 +117,10 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # --- serde / ids / time ---
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# JCS (RFC 8785) canonical JSON — used by iot-audit M3 W1.4 to make the
+# hash chain tamper-detectable (the M1/M2 ad-hoc `serde_json::to_string`
+# form didn't normalise key order or number encoding).
+serde_jcs = "0.1"
 serde_yaml = "0.9"
 toml = "0.8"
 ulid = { version = "1.1", features = ["serde"] }

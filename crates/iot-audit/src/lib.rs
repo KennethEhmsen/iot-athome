@@ -94,14 +94,7 @@ impl AuditLog {
         let prev = inner.last_hash.clone();
         let at = Utc::now();
 
-        let canonical = canonical_json(&payload)?;
-        let mut ctx = digest::Context::new(&digest::SHA256);
-        ctx.update(prev.as_bytes());
-        ctx.update(b"|");
-        ctx.update(kind.as_bytes());
-        ctx.update(b"|");
-        ctx.update(canonical.as_bytes());
-        let hash = hex::encode_lower(ctx.finish().as_ref());
+        let hash = hash_entry(&prev, kind, &payload)?;
 
         let entry = Entry {
             seq,
@@ -128,7 +121,17 @@ impl AuditLog {
         Ok(entry)
     }
 
-    /// Verify the entire log file from seq=0, returning `Ok(())` if the chain is intact.
+    /// Verify the entire log file from seq=0.
+    ///
+    /// Now does three things (M3 W1.4 strengthening from W1-era
+    /// chain-linkage-only check):
+    ///   1. sequence numbers are contiguous from 0
+    ///   2. every entry's `prev` matches the previous entry's `hash`
+    ///   3. **recompute** each entry's hash from (prev || kind ||
+    ///      canonical_json(payload)) and check it matches the stored
+    ///      `hash`. This is what makes the log tamper-detectable —
+    ///      editing any historical payload invalidates its hash, and
+    ///      resetting the stored hash cascades into a chain break.
     pub async fn verify(&self) -> Result<(), AuditError> {
         let f = File::open(&self.path).await?;
         let mut reader = BufReader::new(f);
@@ -157,12 +160,43 @@ impl AuditLog {
                     actual: entry.prev,
                 });
             }
+
+            // Recompute the hash from (prev, kind, canonical_payload)
+            // and compare with the stored `hash`. If someone tampered
+            // with any of those three fields after write, the hashes
+            // diverge and we fail with ChainBroken.
+            let recomputed = hash_entry(&entry.prev, &entry.kind, &entry.payload)?;
+            if recomputed != entry.hash {
+                return Err(AuditError::ChainBroken {
+                    seq: entry.seq,
+                    expected: recomputed,
+                    actual: entry.hash,
+                });
+            }
+
             expected_prev = entry.hash;
             expected_seq += 1;
         }
 
         Ok(())
     }
+}
+
+/// Compute the canonical SHA-256 of an entry.
+///
+/// Canonicalised via JCS (RFC 8785) so the byte-level JSON
+/// representation is unambiguous — key order is sorted, numbers are
+/// normalised. Replaces the M1/M2 ad-hoc `serde_json::to_string` form
+/// per the M2 retro's architectural-debt item 6.
+fn hash_entry(prev: &str, kind: &str, payload: &serde_json::Value) -> Result<Hash, AuditError> {
+    let canonical = serde_jcs::to_string(payload).map_err(AuditError::Json)?;
+    let mut ctx = digest::Context::new(&digest::SHA256);
+    ctx.update(prev.as_bytes());
+    ctx.update(b"|");
+    ctx.update(kind.as_bytes());
+    ctx.update(b"|");
+    ctx.update(canonical.as_bytes());
+    Ok(hex::encode_lower(ctx.finish().as_ref()))
 }
 
 async fn replay_tail(path: &Path) -> Result<(u64, Hash), AuditError> {
@@ -190,15 +224,6 @@ async fn replay_tail(path: &Path) -> Result<(u64, Hash), AuditError> {
     }
 
     Ok((last_seq, last_hash))
-}
-
-fn canonical_json(v: &serde_json::Value) -> Result<String, AuditError> {
-    // `serde_json::to_string` already produces a stable form (sorted maps are
-    // serde's default for `BTreeMap`, not for `serde_json::Map`). For a
-    // minimum-viable canonical form we re-serialize from `Value`, which
-    // preserves insertion order but keeps output deterministic given equal
-    // input Values. A fuller canonical-JSON is a M2+ concern.
-    Ok(serde_json::to_string(v)?)
 }
 
 // ring does not re-export hex; tiny inline helper to avoid an extra dep.
@@ -232,6 +257,43 @@ mod tests {
             .expect("append");
         log.verify().await.expect("verify");
         std::fs::remove_file(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn payload_tampering_is_detected() {
+        let tmp = tempfile_path();
+        let log = AuditLog::open(&tmp).await.expect("open");
+        log.append("test.event", json!({"x": 1})).await.unwrap();
+        log.append("test.event", json!({"x": 2})).await.unwrap();
+
+        // Rewrite the file flipping the payload of seq=0 without
+        // touching the hash. Pre-M3 this was undetectable; with the
+        // JCS canonical form + verify() that recomputes hashes, the
+        // chain now breaks.
+        let raw = tokio::fs::read_to_string(&tmp).await.unwrap();
+        let tampered = raw.replacen(r#""x":1"#, r#""x":999"#, 1);
+        assert_ne!(raw, tampered, "tamper substitution must land");
+        tokio::fs::write(&tmp, tampered).await.unwrap();
+
+        let fresh = AuditLog::open(&tmp).await.expect("reopen");
+        let err = fresh.verify().await.expect_err("verify should fail");
+        assert!(
+            matches!(err, AuditError::ChainBroken { .. }),
+            "expected ChainBroken, got {err:?}"
+        );
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn jcs_key_order_is_stable_across_appends() {
+        // Two structurally-identical payloads with different key
+        // insertion orders must hash identically under JCS. Proves
+        // the canonicalisation actually normalises.
+        let a = json!({"y": 2, "x": 1});
+        let b = json!({"x": 1, "y": 2});
+        let h1 = hash_entry("", "k", &a).unwrap();
+        let h2 = hash_entry("", "k", &b).unwrap();
+        assert_eq!(h1, h2);
     }
 
     fn tempfile_path() -> PathBuf {
