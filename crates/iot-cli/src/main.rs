@@ -10,8 +10,12 @@
 //!   dir.
 //! * `iotctl plugin list`: enumerate installed plugins.
 //! * `iotctl plugin uninstall <id>`: remove an installed plugin.
+//! * `iotctl rule {add,list,delete,test}`: manage automation rules
+//!   (M3 W2.3). `test` dry-runs a rule against a synthetic payload
+//!   without touching the bus.
 
 mod plugin;
+mod rule;
 
 use anyhow::{anyhow, Context as _, Result};
 use clap::{Parser, Subcommand};
@@ -54,6 +58,10 @@ enum Command {
     /// Plugin management (local filesystem; no broker required).
     #[command(subcommand)]
     Plugin(plugin::PluginCmd),
+    /// Automation rule management (local filesystem; engine loads
+    /// from the same dir via iot-automation Config::rules_dir).
+    #[command(subcommand)]
+    Rule(rule::RuleCmd),
 }
 
 #[derive(Debug, Subcommand)]
@@ -107,6 +115,7 @@ async fn main() -> Result<()> {
         Command::Ping => cmd_ping().await,
         Command::Device(sub) => cmd_device(&cli.registry, sub).await,
         Command::Plugin(sub) => plugin::run(sub),
+        Command::Rule(sub) => rule::run(sub),
     };
 
     iot_observability::shutdown();

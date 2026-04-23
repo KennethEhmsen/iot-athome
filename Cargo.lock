@@ -2084,6 +2084,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "futures",
+ "iot-automation",
  "iot-bus",
  "iot-core",
  "iot-observability",

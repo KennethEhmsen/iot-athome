@@ -23,6 +23,10 @@ iot-observability = { path = "../iot-observability" }
 # `iotctl plugin install` reuses the host's manifest parser so the CLI and
 # the runtime agree on what a valid manifest is, byte-for-byte.
 iot-plugin-host = { path = "../iot-plugin-host" }
+# `iotctl rule {add,list,test,…}` shares the rule compiler + expression
+# evaluator with the engine, so a rule that validates on the CLI is a
+# rule the engine can load.
+iot-automation = { path = "../iot-automation" }
 
 anyhow.workspace = true
 async-nats.workspace = true
