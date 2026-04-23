@@ -23,6 +23,8 @@ iot-config = { path = "../iot-config" }
 iot-observability = { path = "../iot-observability" }
 
 anyhow.workspace = true
+# Engine loop calls StreamExt::next on the bus subscription.
+futures.workspace = true
 # M3 W2: rule YAML parser + mini-expression evaluator. The evaluator
 # consumes JSON payloads at runtime so serde_json is on the critical
 # path; yaml for the rule file format.
