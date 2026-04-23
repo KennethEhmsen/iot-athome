@@ -23,7 +23,12 @@ iot-config = { path = "../iot-config" }
 iot-observability = { path = "../iot-observability" }
 
 anyhow.workspace = true
+# M3 W2: rule YAML parser + mini-expression evaluator. The evaluator
+# consumes JSON payloads at runtime so serde_json is on the critical
+# path; yaml for the rule file format.
 serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 tracing.workspace = true
