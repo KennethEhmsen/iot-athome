@@ -137,8 +137,19 @@ async fn handle_socket(mut socket: WebSocket, topics: String, state: AppState) {
                     .as_ref()
                     .and_then(|h| h.get("iot-type"))
                     .map_or_else(String::new, ToString::to_string);
-                let event = shape_event(msg.subject.as_str(), &iot_type, &msg.payload);
-                if send_text(&mut socket, event.to_string()).await.is_err() {
+                // Scope the forward-to-client under the upstream
+                // traceparent so any send-error log line lands under
+                // the same trace id as the publisher.
+                let ctx = iot_bus::extract_trace_context(&msg).map_or_else(
+                    iot_observability::traceparent::TraceContext::new_root,
+                    |p| p.child_of(),
+                );
+                let dropped = iot_observability::traceparent::with_context(ctx, async {
+                    let event = shape_event(msg.subject.as_str(), &iot_type, &msg.payload);
+                    send_text(&mut socket, event.to_string()).await.is_err()
+                })
+                .await;
+                if dropped {
                     debug!("client dropped");
                     break;
                 }

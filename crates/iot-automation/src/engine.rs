@@ -118,7 +118,18 @@ impl Engine {
         info!(rules = self.rules.len(), "automation engine started");
 
         while let Some(msg) = sub.next().await {
-            self.on_message(msg.subject.as_str(), &msg.payload).await;
+            // Scope the handler under the inbound traceparent so the
+            // audit entry + any DLQ publish carries the upstream trace
+            // id. Missing / malformed → fresh root.
+            let ctx = iot_bus::extract_trace_context(&msg).map_or_else(
+                iot_observability::traceparent::TraceContext::new_root,
+                |p| p.child_of(),
+            );
+            let subject = msg.subject.to_string();
+            iot_observability::traceparent::with_context(ctx, async {
+                self.on_message(&subject, &msg.payload).await;
+            })
+            .await;
         }
         info!("engine subscription ended");
         Ok(())

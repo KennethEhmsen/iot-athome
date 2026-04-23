@@ -74,10 +74,21 @@ impl BusWatcher {
         info!("registry bus watcher subscribed to device.>");
 
         while let Some(msg) = futures::StreamExt::next(&mut sub).await {
-            let subject = msg.subject.as_str();
-            if let Err(e) = self.handle(subject).await {
-                warn!(subject, error = %format!("{e:#}"), "bus watcher handle failed");
-            }
+            // Propagate inbound traceparent into the handler's scope so
+            // any db / audit spans lie under the upstream trace, not an
+            // orphan root. Missing / malformed headers fall through to
+            // a fresh root — same policy as the gateway middleware.
+            let ctx = iot_bus::extract_trace_context(&msg).map_or_else(
+                iot_observability::traceparent::TraceContext::new_root,
+                |p| p.child_of(),
+            );
+            let subject = msg.subject.to_string();
+            iot_observability::traceparent::with_context(ctx, async {
+                if let Err(e) = self.handle(&subject).await {
+                    warn!(subject, error = %format!("{e:#}"), "bus watcher handle failed");
+                }
+            })
+            .await;
         }
         info!("bus watcher subscription ended");
         Ok(())
