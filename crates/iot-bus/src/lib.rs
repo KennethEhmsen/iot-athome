@@ -12,6 +12,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod jwt;
+
 use async_nats::HeaderMap;
 use iot_proto::headers::{
     CONTENT_TYPE, CONTENT_TYPE_PROTOBUF, IOT_PUBLISHER, IOT_SCHEMA_VERSION, IOT_TYPE, TRACEPARENT,

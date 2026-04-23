@@ -2058,10 +2058,13 @@ version = "0.1.0"
 dependencies = [
  "async-nats",
  "async-trait",
+ "base64 0.22.1",
  "futures",
  "iot-core",
  "iot-proto",
+ "nkeys",
  "serde",
+ "serde_json",
  "testcontainers",
  "thiserror 2.0.18",
  "tokio",

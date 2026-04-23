@@ -17,8 +17,13 @@ iot-proto = { path = "../iot-proto" }
 
 async-nats.workspace = true
 async-trait.workspace = true
+# NATS JWT auth — M3 W1.3 mints user JWTs from per-plugin nkey seeds
+# (the seeds M2 W3 wrote to `<plugin_dir>/<id>/nats.nkey`).
+nkeys.workspace = true
+base64.workspace = true
 futures.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tracing.workspace = true
