@@ -154,3 +154,30 @@ impl Bus {
 fn current_traceparent() -> Option<String> {
     iot_observability::traceparent::current().map(|tc| tc.to_header())
 }
+
+/// Pull the W3C traceparent out of an inbound NATS message, if
+/// present + well-formed. Designed for bus subscriber loops:
+///
+/// ```ignore
+/// while let Some(msg) = sub.next().await {
+///     let ctx = iot_bus::extract_trace_context(&msg)
+///         .map(|p| p.child_of())
+///         .unwrap_or_else(iot_observability::traceparent::TraceContext::new_root);
+///     iot_observability::traceparent::with_context(ctx, handle(msg)).await;
+/// }
+/// ```
+///
+/// Returns `None` if the message has no headers, no `traceparent`
+/// header, the header's bytes aren't UTF-8, or the value doesn't
+/// pass `TraceContext::parse`. Malformed headers fall through rather
+/// than error — the subscriber keeps handling the message under a
+/// fresh root, matching the gateway's inbound behaviour.
+#[must_use]
+pub fn extract_trace_context(
+    msg: &async_nats::Message,
+) -> Option<iot_observability::traceparent::TraceContext> {
+    let headers = msg.headers.as_ref()?;
+    let value = headers.get(TRACEPARENT)?;
+    let s = std::str::from_utf8(value.as_ref()).ok()?;
+    iot_observability::traceparent::TraceContext::parse(s).ok()
+}
