@@ -155,6 +155,46 @@ impl DeviceRepo {
         self.get(&id).await
     }
 
+    /// Look up a device by `(integration, external_id)`. Returns
+    /// `Ok(None)` if not found — distinct from `Err(NotFound)`, because
+    /// this path is driven by bus events where "not registered yet" is
+    /// the common case (auto-register-on-bus fires on the None branch).
+    #[instrument(skip(self))]
+    pub async fn find_by_external_id(
+        &self,
+        integration: &str,
+        external_id: &str,
+    ) -> Result<Option<Device>> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT id FROM devices WHERE integration = ? AND external_id = ? LIMIT 1",
+        )
+        .bind(integration)
+        .bind(external_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        match row {
+            Some((id,)) => Ok(Some(self.get(&id).await?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Cheap "seen a message, bump last_seen" for an already-known
+    /// device. Avoids a full upsert round-trip; no-ops if the id isn't
+    /// in the table. Case-insensitive on the id to absorb the
+    /// ULID-in-subject lowercase convention (see
+    /// `plugins/zigbee2mqtt-adapter/src/state_publisher.rs`).
+    #[instrument(skip(self))]
+    pub async fn touch_last_seen(&self, id_ci: &str) -> Result<bool> {
+        let now = Utc::now();
+        let affected = sqlx::query("UPDATE devices SET last_seen = ? WHERE lower(id) = lower(?)")
+            .bind(now.to_rfc3339())
+            .bind(id_ci)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        Ok(affected > 0)
+    }
+
     #[instrument(skip(self))]
     pub async fn get(&self, id: &str) -> Result<Device> {
         let row = sqlx::query(

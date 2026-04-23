@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod bus_watcher;
 pub mod repo;
 pub mod service;
 
@@ -109,8 +110,30 @@ pub async fn run(cfg: Config) -> Result<()> {
         None
     };
 
-    let svc = service::RegistrySvc::new(pool, audit, bus);
+    let repo = repo::DeviceRepo::new(pool.clone());
+    let svc = service::RegistrySvc::new(pool, audit, bus.clone());
     let server = RegistryServiceServer::new(svc);
+
+    // Spawn the bus watcher alongside the gRPC server. This is the
+    // mechanism that retires M2's `registry::upsert-device` host
+    // capability — plugins will start publishing state with their
+    // native id in the subject and the registry notices on its own
+    // (see ADR-0013 §Consequences). Skipped if the host was started
+    // without a bus; gRPC-only test setups stay clean.
+    if let Some(bus_for_watcher) = bus {
+        let watcher = bus_watcher::BusWatcher::new(bus_for_watcher, repo);
+        tokio::spawn(async move {
+            if let Err(e) = watcher.run().await {
+                tracing::error!(
+                    error = %format!("{e:#}"),
+                    "bus watcher exited with error"
+                );
+            }
+        });
+        info!("bus watcher spawned");
+    } else {
+        info!("no bus configured — auto-register-on-bus disabled");
+    }
 
     info!("gRPC server listening");
     Server::builder()
