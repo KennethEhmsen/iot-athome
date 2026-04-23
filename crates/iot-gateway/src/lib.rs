@@ -14,6 +14,7 @@ pub mod handlers;
 pub mod json;
 pub mod state;
 pub mod stream;
+pub mod tracing_mw;
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -29,6 +30,7 @@ use tonic::transport::Endpoint;
 use tracing::info;
 
 use crate::auth::{OidcConfig, Verifier};
+use crate::tracing_mw::traceparent_mw;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -131,6 +133,10 @@ pub async fn run(cfg: Config) -> Result<()> {
         // Authorization headers on the browser side).
         .route("/stream", get(stream::stream_handler))
         .merge(rest)
+        // Applied to every route — extracts inbound W3C traceparent
+        // (or mints a fresh root) and scopes the handler in a
+        // TraceContext so bus publishes from the handler inherit it.
+        .layer(middleware::from_fn(traceparent_mw))
         .with_state(state);
 
     let listener = TcpListener::bind(cfg.listen).await?;
