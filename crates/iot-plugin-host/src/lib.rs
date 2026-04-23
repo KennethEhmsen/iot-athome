@@ -10,6 +10,7 @@
 pub mod capabilities;
 pub mod component;
 pub mod manifest;
+pub mod runtime;
 pub mod supervisor;
 
 use std::path::{Path, PathBuf};
@@ -169,17 +170,31 @@ pub async fn run(cfg: Config) -> Result<()> {
         discovered = found.len(),
         "iot-plugin-host starting"
     );
-    // Real plugin supervision (spawning + watchdog) arrives in W4. For W2
-    // the binary loads + logs the plugins it found.
-    for dir in &found {
-        match load_plugin_dir(&engine, dir, HostBindings::default()).await {
-            Ok((_store, _plugin, m)) => {
-                info!(plugin = %m.id, version = %m.version, "loaded");
+
+    // Per-plugin supervisor tasks. Each one owns its restart loop, its
+    // CrashTracker, and eventually its DLQ marker. The host binary's
+    // role is just to spawn them and wait for ctrl-c.
+    let bindings = HostBindings::default();
+    let mut supervisor_tasks = Vec::with_capacity(found.len());
+    for dir in found {
+        let engine = engine.clone();
+        let bindings = bindings.clone();
+        let dir_for_log = dir.clone();
+        supervisor_tasks.push(tokio::spawn(async move {
+            if let Err(e) = supervisor::supervise(engine, dir, bindings).await {
+                tracing::error!(
+                    dir = %dir_for_log.display(),
+                    error = %format!("{e:#}"),
+                    "supervisor exited with error"
+                );
             }
-            Err(e) => tracing::warn!(error = %e, dir = %dir.display(), "load failed"),
-        }
+        }));
     }
+
     tokio::signal::ctrl_c().await?;
     info!("iot-plugin-host shutting down");
+    for task in supervisor_tasks {
+        task.abort();
+    }
     Ok(())
 }

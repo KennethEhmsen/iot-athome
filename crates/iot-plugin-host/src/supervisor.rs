@@ -17,8 +17,14 @@
 //! the operator clears the marker (or re-runs `iotctl plugin install
 //! --force`, which removes the dir tree).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+use anyhow::{Context as _, Result};
+use wasmtime::Engine;
+
+use crate::runtime::{spawn_plugin_task, PluginHandle};
+use crate::{load_plugin_dir, HostBindings};
 
 /// Marker filename inside `<plugin_dir>/<id>/` recording that the host
 /// gave up trying to restart this plugin.
@@ -174,6 +180,119 @@ pub fn clear_dead_lettered(install_dir: &Path) -> std::io::Result<()> {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
+    }
+}
+
+// ------------------------------------------------------ supervise loop
+
+/// Supervise one plugin install directory. Loads the plugin, spawns its
+/// runtime task, and on crash consults [`CrashTracker`] to decide
+/// restart-vs-dead-letter.
+///
+/// Returns:
+///   * `Ok(())` — plugin exited cleanly (explicit Shutdown command, or
+///     its mpsc channel was dropped) OR the supervisor DLQ'd it.
+///   * `Err(_)` — something the supervisor itself couldn't handle
+///     (e.g. the DLQ marker couldn't be written).
+///
+/// On startup, if the install directory is already dead-lettered
+/// (`.dead-lettered` marker exists), the supervisor refuses to load
+/// and returns `Ok(())` immediately. The operator clears the marker
+/// (or re-runs `iotctl plugin install --force`) to un-stick the plugin.
+///
+/// # Errors
+/// Only returns `Err` when the supervisor itself fails (e.g. can't
+/// write the DLQ marker to disk). Plugin-level failures are handled
+/// internally and converted to `Ok(())` on DLQ.
+pub async fn supervise(engine: Engine, install_dir: PathBuf, bindings: HostBindings) -> Result<()> {
+    if is_dead_lettered(&install_dir) {
+        tracing::warn!(
+            dir = %install_dir.display(),
+            "refusing to supervise dead-lettered plugin (clear .dead-lettered to retry)"
+        );
+        return Ok(());
+    }
+
+    let mut tracker = CrashTracker::default();
+
+    loop {
+        // Rebuild Store + Plugin fresh each iteration — Wasmtime doesn't
+        // let you reuse a crashed Store, and the manifest might have been
+        // replaced out from under us between restarts.
+        let (store, plugin, manifest) =
+            match load_plugin_dir(&engine, &install_dir, bindings.clone()).await {
+                Ok(x) => x,
+                Err(e) => {
+                    let reason = format!("load_plugin_dir failed: {e:#}");
+                    tracing::error!(dir = %install_dir.display(), reason = %reason);
+                    if on_crash(&mut tracker, &reason, &install_dir).await? {
+                        return Ok(()); // DLQ'd
+                    }
+                    continue;
+                }
+            };
+
+        tracing::info!(plugin = %manifest.id, version = %manifest.version, "plugin starting");
+        let PluginHandle { id, tx, join } = spawn_plugin_task(manifest.id.clone(), store, plugin);
+
+        // We drop `tx` *after* `join.await` so the channel stays open for
+        // the full task lifetime — otherwise the task would see a closed
+        // channel and exit cleanly as soon as it finished init.
+        let outcome = join.await;
+        drop(tx);
+
+        match outcome {
+            Ok(Ok(())) => {
+                tracing::info!(plugin = %id, "clean shutdown");
+                return Ok(());
+            }
+            Ok(Err(reason)) => {
+                let reason_s = reason.to_string();
+                tracing::warn!(plugin = %id, reason = %reason_s, "plugin crashed");
+                if on_crash(&mut tracker, &reason_s, &install_dir).await? {
+                    return Ok(()); // DLQ'd
+                }
+            }
+            Err(join_err) => {
+                // Task panicked — treat as a crash.
+                let reason_s = format!("task panicked: {join_err}");
+                tracing::error!(plugin = %id, reason = %reason_s);
+                if on_crash(&mut tracker, &reason_s, &install_dir).await? {
+                    return Ok(()); // DLQ'd
+                }
+            }
+        }
+    }
+}
+
+/// Feed one crash into the tracker and react. Returns `true` if the
+/// plugin was just dead-lettered (caller should stop supervising).
+async fn on_crash(tracker: &mut CrashTracker, reason: &str, install_dir: &Path) -> Result<bool> {
+    match tracker.record(Instant::now(), reason) {
+        Decision::Restart { after } => {
+            // `Duration::as_millis()` returns u128 but the tracing macro
+            // records numeric fields as i64/u64; saturating down to u64
+            // is lossless in practice (u64::MAX ms ≈ 584 million years).
+            let backoff_ms = u64::try_from(after.as_millis()).unwrap_or(u64::MAX);
+            tracing::info!(
+                dir = %install_dir.display(),
+                backoff_ms,
+                "scheduling restart"
+            );
+            tokio::time::sleep(after).await;
+            Ok(false)
+        }
+        Decision::DeadLetter { crashes, window } => {
+            tracing::error!(
+                dir = %install_dir.display(),
+                crashes = crashes,
+                window_secs = window.as_secs(),
+                "dead-lettering plugin"
+            );
+            write_dead_lettered(install_dir, reason)
+                .with_context(|| format!("write .dead-lettered at {}", install_dir.display()))?;
+            Ok(true)
+        }
     }
 }
 
