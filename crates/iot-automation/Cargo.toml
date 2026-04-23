@@ -18,6 +18,10 @@ path = "src/main.rs"
 [dependencies]
 iot-core = { path = "../iot-core" }
 iot-proto = { path = "../iot-proto" }
+# Prost messages for `iot.device.v1.EntityState` decode — the engine
+# unwraps protobuf state payloads so rule authors see `payload.value`
+# regardless of whether the adapter published JSON or protobuf.
+iot-proto-core = { path = "../iot-proto-core" }
 iot-bus = { path = "../iot-bus" }
 iot-audit = { path = "../iot-audit" }
 iot-config = { path = "../iot-config" }
@@ -26,6 +30,9 @@ iot-observability = { path = "../iot-observability" }
 anyhow.workspace = true
 # Engine loop calls StreamExt::next on the bus subscription.
 futures.workspace = true
+# EntityState protobuf decode.
+prost.workspace = true
+prost-types.workspace = true
 # M3 W2: rule YAML parser + mini-expression evaluator. The evaluator
 # consumes JSON payloads at runtime so serde_json is on the critical
 # path; yaml for the rule file format.

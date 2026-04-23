@@ -51,6 +51,8 @@ use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
 use iot_audit::AuditLog;
 use iot_bus::Bus;
+use iot_proto_core::iot::device::v1::EntityState;
+use prost::Message as _;
 use tracing::{debug, info, warn};
 
 use crate::expr::eval_bool;
@@ -283,17 +285,26 @@ fn now_unix_ms() -> u64 {
 /// Decode bus payload bytes into a form the expression evaluator can
 /// traverse.
 ///
-/// Current order: JSON first (the most common shape for rule authors +
-/// what `iotctl rule test` produces), then fall through to attempting
-/// prost-decoded `iot.device.v1.EntityState`. Full protobuf decode is a
-/// W2.3 job — for W2.2 we assume rules that care about a given subject
-/// know what shape arrives there.
+/// Order tried:
+///   1. JSON — the shape `iotctl rule test` produces + what most
+///      greenfield rule authors write.
+///   2. Prost-decoded `iot.device.v1.EntityState` — the shape
+///      z2m-and-friends actually publish on `device.*.*.*.state`.
+///      The inner `google.protobuf.Value` unwraps to its JSON
+///      equivalent, surfaced under `payload.value`, with the other
+///      EntityState fields (`device_id`, `entity_id`, `at`,
+///      `schema_version`) alongside.
+///
+/// If neither parser accepts the bytes, the payload surfaces as
+/// Null. Rules that care about shape are expected to know what
+/// subjects they target.
 fn decode_payload(bytes: &[u8]) -> serde_json::Value {
     if bytes.is_empty() {
         return serde_json::Value::Null;
     }
-    // Try JSON — if the first byte looks like it could be the start of
-    // a JSON document, attempt to parse.
+
+    // Try JSON first — cheap shape check on the leading byte avoids
+    // attempting a full parse on obvious protobuf bytes.
     let looks_jsonish = matches!(
         bytes.first(),
         Some(b'{' | b'[' | b'"' | b't' | b'f' | b'n' | b'0'..=b'9')
@@ -303,11 +314,80 @@ fn decode_payload(bytes: &[u8]) -> serde_json::Value {
             return v;
         }
     }
-    // Fall-through: we don't have a protobuf decoder wired here yet;
-    // return Null + trace so the rule's `when` simply evaluates against
-    // a Null payload.
-    debug!("payload bytes don't look like JSON; surfacing as null (proto decode is W2.3)");
+
+    // Fallback: try `iot.device.v1.EntityState`. Wire format is
+    // whatever prost produces; if the bytes aren't EntityState we
+    // surface Null and move on.
+    if let Ok(entity) = EntityState::decode(bytes) {
+        return entity_state_to_json(&entity);
+    }
+
+    debug!("payload decoded as neither JSON nor EntityState; surfacing as null");
     serde_json::Value::Null
+}
+
+/// Flatten an `EntityState` into a rule-friendly JSON object.
+/// `entity.value` (itself a `google.protobuf.Value` union) unwraps to
+/// the natural JSON kind so rule authors can write
+/// `payload.value > 25` instead of `payload.value.numberValue > 25`.
+fn entity_state_to_json(
+    entity: &iot_proto_core::iot::device::v1::EntityState,
+) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    if let Some(id) = &entity.device_id {
+        obj.insert(
+            "device_id".into(),
+            serde_json::Value::String(id.value.clone()),
+        );
+    }
+    if let Some(id) = &entity.entity_id {
+        obj.insert(
+            "entity_id".into(),
+            serde_json::Value::String(id.value.clone()),
+        );
+    }
+    if let Some(v) = &entity.value {
+        obj.insert("value".into(), prost_value_to_json(v));
+    }
+    if let Some(ts) = &entity.at {
+        // Rule authors rarely string-compare timestamps; stringify
+        // as `<seconds>.<nanos>` so the field is present and stable.
+        obj.insert(
+            "at".into(),
+            serde_json::Value::String(format!("{}.{:09}", ts.seconds, ts.nanos)),
+        );
+    }
+    obj.insert(
+        "schema_version".into(),
+        serde_json::Value::Number(entity.schema_version.into()),
+    );
+    serde_json::Value::Object(obj)
+}
+
+/// `google.protobuf.Value` → `serde_json::Value`. Inverse of the
+/// encoding the z2m adapter does for its bus publishes, so the
+/// round-trip is lossless.
+fn prost_value_to_json(v: &prost_types::Value) -> serde_json::Value {
+    use prost_types::value::Kind;
+    let Some(kind) = &v.kind else {
+        return serde_json::Value::Null;
+    };
+    match kind {
+        Kind::NullValue(_) => serde_json::Value::Null,
+        Kind::BoolValue(b) => serde_json::Value::Bool(*b),
+        Kind::NumberValue(n) => serde_json::Number::from_f64(*n)
+            .map_or(serde_json::Value::Null, serde_json::Value::Number),
+        Kind::StringValue(s) => serde_json::Value::String(s.clone()),
+        Kind::ListValue(lst) => {
+            serde_json::Value::Array(lst.values.iter().map(prost_value_to_json).collect())
+        }
+        Kind::StructValue(st) => serde_json::Value::Object(
+            st.fields
+                .iter()
+                .map(|(k, v)| (k.clone(), prost_value_to_json(v)))
+                .collect(),
+        ),
+    }
 }
 
 /// Substitute `{{trigger}}` + `{{payload.path.to.x}}` placeholders in
@@ -403,6 +483,77 @@ mod tests {
         let b = idempotency_key("rule-x", "device.a.b.c.state", b"{}");
         assert_eq!(a, b);
         assert_eq!(a.len(), 64, "SHA-256 hex = 64 chars");
+    }
+
+    // --------------------------------------------------- proto decode
+
+    #[test]
+    fn decode_entity_state_exposes_value_and_ids() {
+        use iot_proto_core::iot::common::v1::Ulid;
+        let msg = EntityState {
+            device_id: Some(Ulid {
+                value: "01HXXDEVICE".into(),
+            }),
+            entity_id: Some(Ulid {
+                value: "01HXXENTITY".into(),
+            }),
+            value: Some(prost_types::Value {
+                kind: Some(prost_types::value::Kind::NumberValue(21.5)),
+            }),
+            at: Some(prost_types::Timestamp {
+                seconds: 1_700_000_000,
+                nanos: 123_000_000,
+            }),
+            schema_version: 1,
+        };
+        let bytes = msg.encode_to_vec();
+        let decoded = decode_payload(&bytes);
+        assert_eq!(decoded["device_id"], "01HXXDEVICE");
+        assert_eq!(decoded["entity_id"], "01HXXENTITY");
+        assert_eq!(decoded["value"], 21.5);
+        assert_eq!(decoded["schema_version"], 1);
+        // `at` is present as a string with nanos zero-padded.
+        assert!(decoded["at"].is_string());
+    }
+
+    #[test]
+    fn decode_entity_state_with_struct_value() {
+        // A payload whose value itself is a struct — maps to a nested
+        // JSON object under payload.value.
+        let inner = prost_types::Struct {
+            fields: [
+                (
+                    "r".to_string(),
+                    prost_types::Value {
+                        kind: Some(prost_types::value::Kind::NumberValue(255.0)),
+                    },
+                ),
+                (
+                    "online".to_string(),
+                    prost_types::Value {
+                        kind: Some(prost_types::value::Kind::BoolValue(true)),
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let msg = EntityState {
+            device_id: None,
+            entity_id: None,
+            value: Some(prost_types::Value {
+                kind: Some(prost_types::value::Kind::StructValue(inner)),
+            }),
+            at: None,
+            schema_version: 1,
+        };
+        let bytes = msg.encode_to_vec();
+        let decoded = decode_payload(&bytes);
+        // `google.protobuf.Value`'s NumberValue always unwraps to f64,
+        // so struct fields that look integer-y stay float on the
+        // JSON side.
+        assert_eq!(decoded["value"]["r"].as_f64(), Some(255.0));
+        assert_eq!(decoded["value"]["online"], true);
     }
 
     #[test]
