@@ -2201,14 +2201,26 @@ dependencies = [
 name = "iot-proto"
 version = "0.1.0"
 dependencies = [
+ "iot-proto-core",
  "prost",
+ "prost-types",
+ "protox",
+ "rstest",
+ "tonic",
+ "tonic-build",
+]
+
+[[package]]
+name = "iot-proto-core"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "prost-build",
  "prost-types",
  "protox",
  "rstest",
  "serde",
  "thiserror 2.0.18",
- "tonic",
- "tonic-build",
 ]
 
 [[package]]

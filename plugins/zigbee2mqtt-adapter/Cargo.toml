@@ -13,11 +13,14 @@ crate-type = ["cdylib"]
 
 [dependencies]
 iot-plugin-sdk-rust = { path = "../../crates/iot-plugin-sdk-rust" }
+# M3 W1: iot-proto split out a wasip2-friendly core (prost messages +
+# subject/header helpers, no tonic). The plugin can now consume the
+# real `EntityState`/`Ulid` definitions instead of redeclaring them.
+iot-proto-core = { path = "../../crates/iot-proto-core" }
 
-# Minimal protobuf encode of `iot.device.v1.EntityState` — the iot-proto
-# crate can't build for wasm32-wasip2 (pulls tonic → hyper → native socket
-# APIs), so the plugin defines the wire-compatible subset inline. Field
-# tags match `schemas/iot/device/v1/entity_event.proto` exactly.
+# Still need prost-types for google.protobuf.{Value,Timestamp} — those
+# are re-exported from iot-proto-core but the plugin constructs them
+# directly, so pull the types crate directly too.
 prost = { version = "0.13", default-features = false, features = ["derive"] }
 prost-types = { version = "0.13", default-features = false, features = ["std"] }
 

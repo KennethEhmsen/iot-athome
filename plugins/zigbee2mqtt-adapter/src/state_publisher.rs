@@ -10,10 +10,15 @@
 
 use iot_plugin_sdk_rust::iot::plugin_host::bus;
 use iot_plugin_sdk_rust::iot::plugin_host::log;
+use iot_proto_core::iot::device::v1::EntityState;
+use iot_proto_core::Ulid;
 use prost::Message as _;
 
-use crate::pb::{EntityState, Ulid, ENTITY_STATE_TYPE};
 use crate::translator::known_entity_keys;
+
+/// Fully-qualified Protobuf type name used in the `iot-type` bus
+/// header. Matches the real iot-proto package on the decoder side.
+const ENTITY_STATE_TYPE: &str = "iot.device.v1.EntityState";
 
 /// Published on `device.<plugin>.<id>.<entity>.state` per recognised key.
 pub fn publish_all(device_id_ulid: &str, friendly: &str, payload: &serde_json::Value) {

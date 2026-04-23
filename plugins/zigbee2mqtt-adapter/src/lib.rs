@@ -24,7 +24,6 @@
 
 #![forbid(unsafe_code)]
 
-mod pb;
 mod state_publisher;
 mod translator;
 

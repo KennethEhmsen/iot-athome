@@ -1,0 +1,36 @@
+[package]
+name = "iot-proto-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "IoT-AtHome — Protobuf message types + bus header + subject helpers (wasm32-wasip2 friendly, no tonic)."
+build = "build.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Pure prost: message types only, no tonic. Lets this crate build for
+# wasm32-wasip2 where tonic→hyper→native-sockets chain doesn't compile.
+# `iot-proto` (sibling crate) depends on this one + adds the tonic
+# gRPC service client/server layer for host-side consumers.
+prost.workspace = true
+prost-types.workspace = true
+
+# Non-generated helpers — moved here from `iot-proto` so every
+# downstream (including wasm plugins) gets the subject builders +
+# header names without pulling tonic.
+serde.workspace = true
+thiserror.workspace = true
+
+[build-dependencies]
+# protox parses .proto files in pure Rust. Identical toolchain story
+# as iot-proto — no protoc binary on any platform.
+protox.workspace = true
+prost-build = "0.13"
+
+[dev-dependencies]
+rstest.workspace = true
