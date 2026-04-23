@@ -2070,6 +2070,7 @@ dependencies = [
  "base64 0.22.1",
  "futures",
  "iot-core",
+ "iot-observability",
  "iot-proto",
  "nkeys",
  "serde",
@@ -2171,6 +2172,7 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.2.17",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]

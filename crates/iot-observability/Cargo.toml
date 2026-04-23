@@ -19,3 +19,12 @@ thiserror.workspace = true
 # getrandom is already transitive via many other deps; pinning as a
 # direct dep so the fallback feature set stays under our control.
 getrandom = "0.2"
+# M3 W2.6 task-local trace context propagation. The `task_local!`
+# macro lets us carry the active TraceContext implicitly through an
+# async call tree — handlers set it on entry, bus.publish reads it,
+# no per-call argument threading.
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+# with-context task-local tests spawn tokio tasks.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

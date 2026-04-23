@@ -143,15 +143,14 @@ impl Bus {
     }
 }
 
-/// Best-effort extraction of the active W3C traceparent from the tracing
-/// subscriber. Returns `None` if no compatible OTel layer is installed.
-///
-/// Integrations that require propagation can always override by passing an
-/// explicit header.
+/// Best-effort extraction of the active W3C traceparent from the
+/// task-local context set by `iot_observability::traceparent::with_context`.
+/// Returns `None` when the current task wasn't entered through a
+/// `with_context` scope — which is the right behaviour: top-level
+/// binaries that haven't yet opened a trace don't stamp one on their
+/// outbound publishes. Callers that explicitly want to start a trace
+/// generate + scope a [`iot_observability::traceparent::TraceContext`]
+/// themselves.
 fn current_traceparent() -> Option<String> {
-    // The real implementation plumbs `tracing_opentelemetry::OpenTelemetrySpanExt`
-    // to pull the current context and serialize it to traceparent form. Kept as
-    // a placeholder for W1 so the API shape is stable; the mechanism lands in
-    // M2 alongside the first consumer.
-    None
+    iot_observability::traceparent::current().map(|tc| tc.to_header())
 }

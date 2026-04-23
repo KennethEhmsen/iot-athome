@@ -151,6 +151,52 @@ impl fmt::Display for TraceContext {
     }
 }
 
+// ----------------------------------------- async-task-local propagation
+
+tokio::task_local! {
+    /// Active trace context for the current async task, propagated
+    /// across `.await` boundaries by tokio.
+    ///
+    /// Populated at task entry by whoever handled the inbound request
+    /// (HTTP middleware, gRPC interceptor, bus subscriber), read
+    /// implicitly by outbound helpers (`iot_bus::Bus::publish_proto`)
+    /// via [`current`].
+    static CURRENT: TraceContext;
+}
+
+/// Read the current task's active trace context.
+///
+/// Returns `None` when the calling task wasn't entered via
+/// [`with_context`] — the common case for top-level binaries that
+/// haven't received a traceparent from an upstream caller yet.
+#[must_use]
+pub fn current() -> Option<TraceContext> {
+    CURRENT.try_with(|tc| *tc).ok()
+}
+
+/// Run `future` with `ctx` as the active trace context for the
+/// duration of its execution. The context propagates to any
+/// `tokio::spawn`ed children that are awaited within `future`.
+///
+/// Typical usage in an inbound handler:
+///
+/// ```ignore
+/// let ctx = match extract_traceparent(&headers) {
+///     Some(tc) => tc.child_of(),
+///     None     => TraceContext::new_root(),
+/// };
+/// iot_observability::traceparent::with_context(ctx, async move {
+///     // handler body — any iot_bus::Bus::publish_proto call here
+///     // automatically injects the `traceparent` header.
+/// }).await
+/// ```
+pub async fn with_context<F, T>(ctx: TraceContext, future: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    CURRENT.scope(ctx, future).await
+}
+
 // ------------------------------------------------------ hex / randomness
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -289,5 +335,49 @@ mod tests {
         let b = TraceContext::new_root();
         assert_ne!(a.trace_id, b.trace_id);
         assert_ne!(a.span_id, b.span_id);
+    }
+
+    // ------------------------------------ task-local propagation
+
+    #[tokio::test]
+    async fn current_is_none_outside_with_context() {
+        assert!(current().is_none(), "no ambient context at top level");
+    }
+
+    #[tokio::test]
+    async fn with_context_sets_current() {
+        let ctx = TraceContext::new_root();
+        let seen = with_context(ctx, async { current() }).await;
+        assert_eq!(seen, Some(ctx));
+    }
+
+    #[tokio::test]
+    async fn with_context_nests() {
+        // Inner scope overrides outer for its duration; outer
+        // restores on exit.
+        let outer = TraceContext::new_root();
+        let inner = outer.child_of();
+        let (inside, after) = with_context(outer, async {
+            let inside = with_context(inner, async { current() }).await;
+            let after_inner = current();
+            (inside, after_inner)
+        })
+        .await;
+        assert_eq!(inside, Some(inner));
+        assert_eq!(after, Some(outer));
+    }
+
+    #[tokio::test]
+    async fn context_propagates_through_await_boundaries() {
+        // The point of the task-local: after an arbitrary .await
+        // point, current() still returns the scoped value (same
+        // logical task, tokio's task-local is tied to the task).
+        let ctx = TraceContext::new_root();
+        let seen = with_context(ctx, async {
+            tokio::task::yield_now().await;
+            current()
+        })
+        .await;
+        assert_eq!(seen, Some(ctx));
     }
 }

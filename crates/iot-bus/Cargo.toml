@@ -14,6 +14,10 @@ workspace = true
 [dependencies]
 iot-core = { path = "../iot-core" }
 iot-proto = { path = "../iot-proto" }
+# Task-local TraceContext propagation — `current_traceparent()`
+# reads from the active `with_context` scope so outbound publishes
+# automatically carry the caller's trace id.
+iot-observability = { path = "../iot-observability" }
 
 async-nats.workspace = true
 async-trait.workspace = true
