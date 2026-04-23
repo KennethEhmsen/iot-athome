@@ -241,6 +241,13 @@ pub async fn supervise(engine: Engine, install_dir: PathBuf, bindings: HostBindi
         let outcome = join.await;
         drop(tx);
 
+        // Flush any MQTT router registrations this incarnation left
+        // behind. On restart we'll register fresh; without this, stale
+        // entries hold a dead tx and get pruned lazily on next dispatch.
+        if let Some(router) = bindings.mqtt.as_ref() {
+            router.unregister(&id);
+        }
+
         match outcome {
             Ok(Ok(())) => {
                 tracing::info!(plugin = %id, "clean shutdown");

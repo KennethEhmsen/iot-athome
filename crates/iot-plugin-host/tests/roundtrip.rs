@@ -43,6 +43,7 @@ async fn demo_echo_manifest_load_init_deny_audit() -> Result<(), Box<dyn std::er
         HostBindings {
             bus: None,
             audit: Some(audit.clone()),
+            mqtt: None,
         },
     )
     .await?;

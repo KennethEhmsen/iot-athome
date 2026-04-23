@@ -10,6 +10,7 @@
 pub mod capabilities;
 pub mod component;
 pub mod manifest;
+pub mod mqtt;
 pub mod runtime;
 pub mod supervisor;
 
@@ -39,13 +40,17 @@ fn default_plugin_dir() -> String {
     "/var/lib/iotathome/plugins".into()
 }
 
-/// Runtime bindings the host feeds into every loaded plugin. Both are
+/// Runtime bindings the host feeds into every loaded plugin. All are
 /// optional so unit / offline tests can exercise the capability path
-/// without a live NATS server or on-disk audit log.
+/// without a live NATS server, on-disk audit log, or MQTT broker.
 #[derive(Debug, Clone, Default)]
 pub struct HostBindings {
     pub bus: Option<Bus>,
     pub audit: Option<Arc<AuditLog>>,
+    /// Shared MQTT router (per-host-process). `mqtt::subscribe` host
+    /// calls register here; the broker dispatcher (next commit) feeds
+    /// inbound messages into `MqttRouter::dispatch`.
+    pub mqtt: Option<crate::mqtt::MqttRouter>,
 }
 
 /// Construct a Wasmtime Engine preconfigured for the Component Model + async
@@ -129,6 +134,11 @@ pub async fn load_plugin(
         capabilities,
         bus: bindings.bus,
         audit: bindings.audit,
+        mqtt: bindings.mqtt,
+        // `self_tx` is filled in by `spawn_plugin_task` after the
+        // mpsc channel is created — we can't know it here because
+        // load_plugin is the synchronous side of construction.
+        self_tx: None,
         wasi: wasmtime_wasi::WasiCtxBuilder::new()
             .inherit_stderr()
             .build(),

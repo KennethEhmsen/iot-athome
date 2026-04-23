@@ -135,7 +135,10 @@ fn matches_subject(pattern: &str, subject: &str) -> bool {
 /// Used by `check_mqtt_publish` ("does any allow-listed pattern cover
 /// the topic the plugin wants to publish on?"). `mqtt_filter_covers`
 /// below handles the subscribe-side narrowing check.
-fn matches_mqtt_topic(pattern: &str, topic: &str) -> bool {
+///
+/// Also reused by the [`crate::mqtt::MqttRouter`] to decide whether a
+/// plugin-registered filter matches an inbound broker message.
+pub fn matches_mqtt_topic(pattern: &str, topic: &str) -> bool {
     let mut pat = pattern.split('/');
     let mut top = topic.split('/');
     loop {

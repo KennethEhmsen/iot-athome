@@ -102,8 +102,21 @@ const MAILBOX_DEPTH: usize = 64;
 /// Spawn a tokio task that owns `store` + `plugin` and runs the command
 /// loop. Returns immediately with a handle; the caller (supervisor)
 /// awaits `handle.join` to learn the outcome.
-pub fn spawn_plugin_task(id: String, store: Store<PluginState>, plugin: Plugin) -> PluginHandle {
+///
+/// Side effect: injects the newly-minted `tx` into `store.data_mut()`
+/// so the plugin's in-task `mqtt::Host::subscribe` impl can register
+/// itself with the shared router (which needs a way to deliver back
+/// to exactly this task).
+pub fn spawn_plugin_task(
+    id: String,
+    mut store: Store<PluginState>,
+    plugin: Plugin,
+) -> PluginHandle {
     let (tx, rx) = mpsc::channel(MAILBOX_DEPTH);
+    // Give the plugin access to its own mailbox before init() can
+    // possibly call mqtt::subscribe.
+    store.data_mut().self_tx = Some(tx.clone());
+
     let id_for_task = id.clone();
     let join = tokio::spawn(async move { run_plugin_task(id_for_task, store, plugin, rx).await });
     PluginHandle { id, tx, join }

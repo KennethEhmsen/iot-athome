@@ -40,13 +40,24 @@ wasmtime::component::bindgen!({
 
 /// Per-plugin runtime state passed into the Wasmtime Store.
 ///
-/// `bus` and `audit` are `Option` so unit tests can exercise the
-/// capability / wiring logic without requiring a live NATS server.
+/// `bus`, `audit`, `mqtt`, `self_tx` are all `Option` so unit tests can
+/// exercise the capability / wiring logic without requiring live
+/// broker connections or the plugin runtime task infrastructure.
 pub struct PluginState {
     pub id: String,
     pub capabilities: CapabilityMap,
     pub bus: Option<Bus>,
     pub audit: Option<Arc<AuditLog>>,
+    /// Shared MQTT routing table. `mqtt::subscribe` host calls register
+    /// here; inbound broker messages fan out to the plugins whose
+    /// filters match. `None` when the host was built without MQTT
+    /// support (most unit tests).
+    pub mqtt: Option<crate::mqtt::MqttRouter>,
+    /// This plugin's own mailbox, used when registering with
+    /// `MqttRouter` so inbound messages route back to us. Filled in by
+    /// [`crate::runtime::spawn_plugin_task`] after the mpsc channel
+    /// exists; `None` outside a spawned runtime task.
+    pub self_tx: Option<tokio::sync::mpsc::Sender<crate::runtime::PluginCommand>>,
     /// WASI preview-2 context. The wasip2 preview adapter emits imports
     /// (environment/stdin/stdout/...) for every compiled plugin; these
     /// satisfy them.
@@ -210,9 +221,18 @@ impl crate::component::iot::plugin_host::mqtt::Host for PluginState {
                 message: d.message,
             });
         }
-        // Broker wiring arrives next commit; for now we log the intent
-        // so the capability path is end-to-end testable.
-        info!("mqtt.subscribe (broker dispatcher not wired yet — intent recorded)");
+        // Register with the router if both pieces are wired. Tests and
+        // the demo-echo roundtrip don't go through the runtime task
+        // (no self_tx) or don't hook up an MQTT router (no mqtt) — in
+        // both cases the capability path is still enforced; the
+        // registration just becomes a no-op.
+        match (self.mqtt.as_ref(), self.self_tx.as_ref()) {
+            (Some(router), Some(tx)) => {
+                router.register(self.id.clone(), filter.clone(), tx.clone());
+                info!("mqtt.subscribe registered");
+            }
+            _ => info!("mqtt.subscribe (router not wired — intent recorded)"),
+        }
         Ok(())
     }
 
