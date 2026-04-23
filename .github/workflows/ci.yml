@@ -227,7 +227,17 @@ jobs:
             cosign sign-blob --yes "$f" --bundle "$f.cosign.bundle"
           done
       - name: SLSA provenance
+        # GitHub's attestation API refuses on user-owned private repos
+        # ("Feature not available for user-owned private repositories").
+        # The cosign sign-blob step above already signed every artifact
+        # and recorded a Rekor entry, so the release's authenticity story
+        # is intact. `continue-on-error: true` keeps the SLSA-L3 provenance
+        # layer as a warning (per ADR-0006 "plumbed as warning, move to
+        # gate in M6"). When the repo goes public or moves to a paid plan,
+        # flip this to `false` and sign will fail loudly on attestation
+        # issues the way cosign already does.
         uses: actions/attest-build-provenance@v2
+        continue-on-error: true
         with:
           subject-path: 'artifacts/**/iot-*'
 
