@@ -82,7 +82,14 @@ pub async fn run(cfg: Config) -> Result<()> {
         .await
         .with_context(|| format!("connect to registry at {}", cfg.registry_url))?;
 
-    let registry_client = RegistryServiceClient::new(channel);
+    // `with_interceptor` stamps the task-local TraceContext onto the
+    // outbound gRPC metadata; the gateway's `traceparent_mw`
+    // populates that task-local on every inbound request, so the
+    // registry sees the same trace id (M3 post-v0.3.0 follow-up).
+    let registry_client: state::RegistryClient = RegistryServiceClient::with_interceptor(
+        channel,
+        state::inject_traceparent as state::TraceparentInterceptor,
+    );
 
     let bus = if let Some(bus_cfg) = cfg.bus {
         match iot_bus::Bus::connect(bus_cfg).await {
