@@ -34,6 +34,13 @@ pub struct Config {
     /// Directory scanned for installed plugins.
     #[serde(default = "default_plugin_dir")]
     pub plugin_dir: String,
+    /// MQTT broker this host connects to on startup. When present,
+    /// plugins declaring `capabilities.mqtt.*` get a live broker
+    /// handle; when absent, those plugins still load but their
+    /// `mqtt::subscribe` / `publish` calls degrade to dry-run logs
+    /// (the capability check still enforces). See ADR-0013.
+    #[serde(default)]
+    pub mqtt: Option<crate::mqtt::MqttBrokerConfig>,
 }
 
 fn default_plugin_dir() -> String {
@@ -183,10 +190,39 @@ pub async fn run(cfg: Config) -> Result<()> {
         "iot-plugin-host starting"
     );
 
+    // Connect the shared MQTT broker up-front (before any plugins
+    // spawn), so every plugin's init() that calls `mqtt::subscribe`
+    // sees a live router + client. `None` is a valid outcome — hosts
+    // with no MQTT-speaking plugins skip the broker entirely and the
+    // capability impls quietly degrade to dry-run.
+    let mqtt = if let Some(mqtt_cfg) = &cfg.mqtt {
+        let router = crate::mqtt::MqttRouter::new();
+        info!(host = %mqtt_cfg.host, port = mqtt_cfg.port, "connecting MQTT broker");
+        match crate::mqtt::MqttBroker::connect(mqtt_cfg.clone(), router).await {
+            Ok(broker) => Some(broker),
+            Err(e) => {
+                // Don't abort the whole host on MQTT failure — non-MQTT
+                // plugins are still useful. Log loud and let the
+                // capability calls degrade.
+                tracing::error!(
+                    error = %format!("{e:#}"),
+                    "MQTT broker connect failed — continuing without broker"
+                );
+                None
+            }
+        }
+    } else {
+        info!("no MQTT broker configured — mqtt.* host calls will dry-run");
+        None
+    };
+
     // Per-plugin supervisor tasks. Each one owns its restart loop, its
     // CrashTracker, and eventually its DLQ marker. The host binary's
     // role is just to spawn them and wait for ctrl-c.
-    let bindings = HostBindings::default();
+    let bindings = HostBindings {
+        mqtt,
+        ..HostBindings::default()
+    };
     let mut supervisor_tasks = Vec::with_capacity(found.len());
     for dir in found {
         let engine = engine.clone();
