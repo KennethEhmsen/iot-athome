@@ -22,6 +22,11 @@ pub struct CapabilityMap {
     pub mqtt: MqttCapabilities,
     #[serde(default)]
     pub net: NetCapabilities,
+    /// Registry host capability (ABI 1.2.0+, transitional — see
+    /// ADR-0013). Plugins that need to register devices with the
+    /// registry (every MQTT→canonical adapter) declare this.
+    #[serde(default)]
+    pub registry: RegistryCapabilities,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -46,6 +51,19 @@ pub struct MqttCapabilities {
 pub struct NetCapabilities {
     #[serde(default)]
     pub outbound: Vec<String>,
+}
+
+/// Registry access — gRPC upsert / list.
+///
+/// Boolean because there's only one registry per host process;
+/// topic-style fine-grained ACL isn't meaningful here. M3 replaces
+/// this with bus-driven auto-register and this capability goes away.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RegistryCapabilities {
+    #[serde(default)]
+    pub upsert: bool,
+    #[serde(default)]
+    pub list: bool,
 }
 
 /// Host-side cap check errors. Wire-compatible with
@@ -91,6 +109,21 @@ impl CapabilityMap {
             code: "capability.denied",
             message: format!("mqtt.publish on `{topic}` not in manifest allow-list"),
         })
+    }
+
+    /// Check that the plugin is allowed to call `registry.upsert-device`.
+    ///
+    /// # Errors
+    /// Returns [`Denied`] if the manifest didn't opt in.
+    pub fn check_registry_upsert(&self) -> Result<(), Denied> {
+        if self.registry.upsert {
+            Ok(())
+        } else {
+            Err(Denied {
+                code: "capability.denied",
+                message: "registry.upsert-device not enabled in manifest".into(),
+            })
+        }
     }
 
     /// Check an MQTT topic filter against the `mqtt.subscribe` allow-list.
@@ -288,6 +321,28 @@ mod tests {
         // Plugin tries a completely different root: DENIED.
         assert!(m.check_mqtt_subscribe("actuators/+/state").is_err());
     }
+
+    // --------------------------------------------------- registry capability
+
+    #[test]
+    fn registry_upsert_denied_by_default() {
+        let m = CapabilityMap::default();
+        assert!(m.check_registry_upsert().is_err());
+    }
+
+    #[test]
+    fn registry_upsert_allowed_when_manifest_opts_in() {
+        let m = CapabilityMap {
+            registry: RegistryCapabilities {
+                upsert: true,
+                list: false,
+            },
+            ..Default::default()
+        };
+        assert!(m.check_registry_upsert().is_ok());
+    }
+
+    // --------------------------------------------------- mqtt subscribe tests
 
     #[test]
     fn mqtt_subscribe_hash_allow_covers_everything_under_prefix() {

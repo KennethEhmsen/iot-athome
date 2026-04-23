@@ -60,6 +60,13 @@ pub struct HostBindings {
     /// startup; pass a clone of the `Arc` into every `load_plugin_dir`
     /// call.
     pub mqtt: Option<Arc<crate::mqtt::MqttBroker>>,
+    /// gRPC channel to the registry service, reused across all
+    /// plugins. Plugins reach it via the `registry` host capability
+    /// (ABI 1.2.0+); `None` means "no registry configured" and the
+    /// capability impl returns a clear `registry.not_configured`
+    /// PluginError to any caller. Intended to be retired when M3
+    /// ships bus-driven auto-register (ADR-0013 Piece 2 §Consequences).
+    pub registry: Option<tonic::transport::Channel>,
 }
 
 /// Construct a Wasmtime Engine preconfigured for the Component Model + async
@@ -137,6 +144,11 @@ pub async fn load_plugin(
         |s| s,
     )
     .context("link mqtt host")?;
+    crate::component::iot::plugin_host::registry::add_to_linker::<_, HasSelf<PluginState>>(
+        &mut linker,
+        |s| s,
+    )
+    .context("link registry host")?;
 
     let state = PluginState {
         id: plugin_id.to_owned(),
@@ -144,6 +156,7 @@ pub async fn load_plugin(
         bus: bindings.bus,
         audit: bindings.audit,
         mqtt: bindings.mqtt,
+        registry: bindings.registry,
         // `self_tx` is filled in by `spawn_plugin_task` after the
         // mpsc channel is created — we can't know it here because
         // load_plugin is the synchronous side of construction.

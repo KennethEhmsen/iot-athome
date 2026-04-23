@@ -2181,6 +2181,7 @@ dependencies = [
  "testcontainers",
  "thiserror 2.0.18",
  "tokio",
+ "tonic",
  "tracing",
  "wasmtime",
  "wasmtime-wasi",

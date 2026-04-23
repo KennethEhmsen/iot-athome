@@ -33,6 +33,9 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
+# Registry host capability (ABI 1.2.0+, transitional per ADR-0013)
+# wraps a tonic gRPC client — the channel lives in HostBindings.
+tonic.workspace = true
 tracing.workspace = true
 wasmtime.workspace = true
 # The wasm32-wasip2 target's preview-2 adapter links wasi:cli/stdin/etc.

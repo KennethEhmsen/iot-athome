@@ -54,6 +54,11 @@ pub struct PluginState {
     /// `None` when the host was built without MQTT support (most unit
     /// tests).
     pub mqtt: Option<Arc<crate::mqtt::MqttBroker>>,
+    /// Shared gRPC channel to the registry service. Plugins call it
+    /// via the `registry` host capability (ABI 1.2.0+). `None` in
+    /// offline / unit-test setups — the host impl returns a clear
+    /// `registry.not_configured` PluginError in that case.
+    pub registry: Option<tonic::transport::Channel>,
     /// This plugin's own mailbox, used when registering with
     /// `MqttRouter` so inbound messages route back to us. Filled in by
     /// [`crate::runtime::spawn_plugin_task`] after the mpsc channel
@@ -291,5 +296,98 @@ impl crate::component::iot::plugin_host::mqtt::Host for PluginState {
                 code: "mqtt.publish_failed".into(),
                 message: format!("{e:#}"),
             })
+    }
+}
+
+// ---------- registry host impl (ABI 1.2.0+, transitional per ADR-0013) ----------
+//
+// Wraps the registry gRPC client so plugins never link tonic/hyper
+// (which don't target wasm32-wasip2). Capability-checked against
+// `capabilities.registry.upsert`. When the host was started without a
+// registry channel (unit tests, offline setups), returns a clear
+// `registry.not_configured` PluginError instead of silently dropping
+// the call — adapters that *need* registry have no useful fallback.
+
+impl crate::component::iot::plugin_host::registry::Host for PluginState {
+    #[tracing::instrument(
+        name = "host_call",
+        skip(self),
+        fields(
+            plugin = %self.id,
+            capability = "registry.upsert-device",
+            integration = %integration,
+            external_id = %external_id,
+        ),
+    )]
+    async fn upsert_device(
+        &mut self,
+        integration: String,
+        external_id: String,
+        label: String,
+        manufacturer: String,
+        model: String,
+    ) -> Result<String, PluginError> {
+        if let Err(d) = self.capabilities.check_registry_upsert() {
+            warn!(reason = d.code, "capability.denied");
+            record_denied(
+                self.audit.clone(),
+                self.id.clone(),
+                format!("registry.upsert-device({integration}/{external_id})"),
+                d.code.to_string(),
+            )
+            .await;
+            return Err(PluginError {
+                code: d.code.to_string(),
+                message: d.message,
+            });
+        }
+        let Some(channel) = self.registry.clone() else {
+            return Err(PluginError {
+                code: "registry.not_configured".into(),
+                message: "host has no registry channel — check Config::registry_url".into(),
+            });
+        };
+
+        use iot_proto::iot::device::v1::{Device, TrustLevel};
+        use iot_proto::iot::registry::v1::registry_service_client::RegistryServiceClient;
+        use iot_proto::iot::registry::v1::UpsertDeviceRequest;
+
+        let mut client = RegistryServiceClient::new(channel);
+        let device = Device {
+            id: None,
+            integration: integration.clone(),
+            external_id: external_id.clone(),
+            manufacturer,
+            model,
+            label,
+            rooms: Vec::new(),
+            capabilities: Vec::new(),
+            entities: Vec::new(),
+            trust_level: TrustLevel::UserAdded.into(),
+            schema_version: iot_core::DEVICE_SCHEMA_VERSION,
+            plugin_meta: std::collections::HashMap::default(),
+            last_seen: None,
+        };
+        let resp = client
+            .upsert_device(UpsertDeviceRequest {
+                device: Some(device),
+                idempotency_key: String::new(),
+            })
+            .await
+            .map_err(|e| PluginError {
+                code: "registry.upsert_failed".into(),
+                message: format!("{e:#}"),
+            })?
+            .into_inner();
+        let ulid = resp
+            .device
+            .and_then(|d| d.id)
+            .map(|u| u.value)
+            .ok_or_else(|| PluginError {
+                code: "registry.upsert_failed".into(),
+                message: "registry returned no device / id".into(),
+            })?;
+        debug!(ulid = %ulid, created = resp.created, "registry.upsert-device ok");
+        Ok(ulid)
     }
 }

@@ -12,7 +12,11 @@
 // Additive minor bumps:
 //   1.1.0 — mqtt host interface + on-mqtt-message runtime export
 //           (ADR-0013, M2 W4).
-package iot:plugin-host@1.1.0;
+//   1.2.0 — registry host interface (transitional per ADR-0013);
+//           retires when M3 ships registry-side bus-driven
+//           auto-register, at which point plugins stop needing this
+//           capability.
+package iot:plugin-host@1.2.0;
 
 interface types {
     /// Dotted-namespace stable error code (see ADR-0008).
@@ -52,6 +56,31 @@ interface bus {
 interface log {
     enum level { trace, debug, info, warn, error }
     emit: func(level: level, target: string, message: string);
+}
+
+/// Registry (transitional, 1.2.0+): lets adapter plugins upsert
+/// devices + look them up by external-id. The host wraps a tonic gRPC
+/// client so the plugin doesn't have to link tonic / hyper / tokio
+/// (which wouldn't build for wasm32-wasip2 anyway).
+///
+/// Retired when M3 ships registry-side bus-driven auto-register —
+/// at that point the registry reads `device.*` bus events and
+/// registers unknown `(integration, external_id)` pairs on sight.
+/// Until then, this capability is how z2m etc. keep M1's
+/// upsert-on-first-sight ergonomics.
+interface registry {
+    use types.{plugin-error};
+
+    /// Upsert a device by `(integration, external-id)`. Returns the
+    /// registry-assigned ULID. Capability-checked against
+    /// `capabilities.registry.upsert`.
+    upsert-device: func(
+        integration: string,
+        external-id: string,
+        label: string,
+        manufacturer: string,
+        model: string,
+    ) -> result<string, plugin-error>;
 }
 
 /// MQTT: the host owns one broker connection and multiplexes subscribe/
@@ -115,5 +144,6 @@ world plugin {
     import bus;
     import log;
     import mqtt;
+    import registry;
     export runtime;
 }
