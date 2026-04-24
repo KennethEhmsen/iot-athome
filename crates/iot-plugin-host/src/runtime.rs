@@ -99,9 +99,30 @@ pub struct PluginHandle {
 /// plugin latency when we get profiling.
 const MAILBOX_DEPTH: usize = 64;
 
+/// Default per-call fuel budget when the plugin manifest doesn't
+/// specify one (or specifies 0).
+///
+/// 10M fuel ≈ 100 ms of typical adapter CPU on x86_64 — generous
+/// for translator-style work (parse JSON, build a protobuf,
+/// publish). Plugins that need more raise `resources.fuel_max` in
+/// their manifest; the host trusts the per-plugin number until the
+/// cap surfaces a misbehaving runaway loop.
+///
+/// Without per-call refuel (the M2-era behaviour), the Store's
+/// initial fuel from `load_plugin` was monotonically consumed
+/// across `init` + every `on_message` + every `on_mqtt_message` —
+/// long-running plugins would silently run out and trap mid-call.
+/// M5a W3 closes that.
+pub const DEFAULT_FUEL_PER_CALL: u64 = 10_000_000;
+
 /// Spawn a tokio task that owns `store` + `plugin` and runs the command
 /// loop. Returns immediately with a handle; the caller (supervisor)
 /// awaits `handle.join` to learn the outcome.
+///
+/// `fuel_per_call` is the budget the task refills the Store with
+/// before each guest invocation (`init`, `on_message`,
+/// `on_mqtt_message`). Pass [`DEFAULT_FUEL_PER_CALL`] when the
+/// manifest doesn't supply a value.
 ///
 /// Side effect: injects the newly-minted `tx` into `store.data_mut()`
 /// so the plugin's in-task `mqtt::Host::subscribe` impl can register
@@ -111,6 +132,7 @@ pub fn spawn_plugin_task(
     id: String,
     mut store: Store<PluginState>,
     plugin: Plugin,
+    fuel_per_call: u64,
 ) -> PluginHandle {
     let (tx, rx) = mpsc::channel(MAILBOX_DEPTH);
     // Give the plugin access to its own mailbox before init() can
@@ -118,20 +140,48 @@ pub fn spawn_plugin_task(
     store.data_mut().self_tx = Some(tx.clone());
 
     let id_for_task = id.clone();
-    let join = tokio::spawn(async move { run_plugin_task(id_for_task, store, plugin, rx).await });
+    let join = tokio::spawn(async move {
+        run_plugin_task(id_for_task, store, plugin, rx, fuel_per_call).await
+    });
     PluginHandle { id, tx, join }
+}
+
+/// Refuel the store before a guest invocation. Wasmtime's
+/// `set_fuel` writes the absolute remaining-fuel counter — a fresh
+/// budget is what we want each call.
+///
+/// Failure to set fuel would mean the engine wasn't built with
+/// `consume_fuel(true)` (a host bug, not a plugin bug); we log and
+/// continue so the call still runs. If the engine is misconfigured,
+/// callers will see "fuel not enabled" traps instead of clean
+/// budgets, which surfaces faster than silent drift.
+fn refuel(store: &mut Store<PluginState>, plugin_id: &str, fuel_per_call: u64) {
+    if let Err(e) = store.set_fuel(fuel_per_call) {
+        tracing::warn!(
+            plugin = %plugin_id,
+            fuel = fuel_per_call,
+            error = %e,
+            "refuel: set_fuel failed (engine missing consume_fuel?)"
+        );
+    }
 }
 
 /// The task body. Calls `init`, then loops on `rx` until shutdown or a
 /// trap. A trap from any export short-circuits the loop with `Err`; an
 /// app-level `PluginError` from a handler is logged and we keep going.
+///
+/// Each guest invocation gets a fresh `fuel_per_call` budget via
+/// `set_fuel` — fuel doesn't accumulate across calls, so a steadily-
+/// loaded plugin can't run the Store dry between handler returns.
 async fn run_plugin_task(
     id: String,
     mut store: Store<PluginState>,
     plugin: Plugin,
     mut rx: mpsc::Receiver<PluginCommand>,
+    fuel_per_call: u64,
 ) -> Result<(), CrashReason> {
     // 1. init — this is the primary "did the plugin come up?" signal.
+    refuel(&mut store, &id, fuel_per_call);
     match plugin.iot_plugin_host_runtime().call_init(&mut store).await {
         Ok(Ok(())) => {
             tracing::info!(plugin = %id, "init ok");
@@ -161,6 +211,7 @@ async fn run_plugin_task(
                 iot_type,
                 payload,
             } => {
+                refuel(&mut store, &id, fuel_per_call);
                 let outcome = plugin
                     .iot_plugin_host_runtime()
                     .call_on_message(&mut store, &subject, &iot_type, &payload)
@@ -182,6 +233,7 @@ async fn run_plugin_task(
                 }
             }
             PluginCommand::OnMqttMessage { topic, payload } => {
+                refuel(&mut store, &id, fuel_per_call);
                 let outcome = plugin
                     .iot_plugin_host_runtime()
                     .call_on_mqtt_message(&mut store, &topic, &payload)

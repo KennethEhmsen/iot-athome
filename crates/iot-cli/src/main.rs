@@ -17,7 +17,10 @@
 //!   bootstrap (M5a W1). `bootstrap` mints the operator + account
 //!   trust root; `mint-user` issues a plugin user JWT + writes a
 //!   `.creds` file.
+//! * `iotctl mosquitto regen-acl`: regenerate the Mosquitto ACL file
+//!   from the union of installed plugins' MQTT capabilities (M5a W3).
 
+mod mosquitto;
 mod nats;
 mod plugin;
 mod rule;
@@ -71,6 +74,10 @@ enum Command {
     /// No network I/O — pure keypair + JWT generation.
     #[command(subcommand)]
     Nats(nats::NatsCmd),
+    /// Mosquitto helpers (M5a W3) — currently `regen-acl`,
+    /// rebuilding the broker ACL from installed-plugin manifests.
+    #[command(subcommand)]
+    Mosquitto(mosquitto::MosquittoCmd),
 }
 
 #[derive(Debug, Subcommand)]
@@ -126,6 +133,7 @@ async fn main() -> Result<()> {
         Command::Plugin(sub) => plugin::run(sub),
         Command::Rule(sub) => rule::run(sub),
         Command::Nats(sub) => nats::run(sub),
+        Command::Mosquitto(sub) => mosquitto::run(sub),
     };
 
     iot_observability::shutdown();

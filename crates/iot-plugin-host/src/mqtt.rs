@@ -23,6 +23,7 @@
 //!                          PluginTask (owns Store)
 //! ```
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -84,12 +85,26 @@ impl MqttRouter {
     /// supervisor when a plugin task exits (clean shutdown or DLQ) so
     /// the closed `tx` doesn't linger and every dispatch doesn't have
     /// to prune it.
-    pub fn unregister(&self, plugin_id: &str) {
+    ///
+    /// Returns the list of filters that were registered to the
+    /// removed plugin so the caller (the supervisor) can drop each
+    /// from the broker-side refcount via
+    /// [`MqttBroker::unsubscribe_filter`]. M5a W3 — debt #7 closure;
+    /// before this the broker would keep the underlying TCP-level
+    /// subscription open after the last plugin holding it died.
+    pub fn unregister(&self, plugin_id: &str) -> Vec<String> {
         #[allow(clippy::unwrap_used)]
-        self.inner
-            .write()
-            .unwrap()
-            .retain(|s| s.plugin_id != plugin_id);
+        let mut guard = self.inner.write().unwrap();
+        let mut removed = Vec::new();
+        guard.retain(|s| {
+            if s.plugin_id == plugin_id {
+                removed.push(s.filter.clone());
+                false
+            } else {
+                true
+            }
+        });
+        removed
     }
 
     /// Deliver an inbound `(topic, payload)` pair to every registered
@@ -198,10 +213,19 @@ fn default_client_id() -> String {
 ///
 /// Cheap to clone the `Arc<MqttBroker>` handle; the broker itself is
 /// a singleton per host process.
+///
+/// `filter_refcount` is the per-filter subscription count: when
+/// plugin A subscribes to `rtl_433/+` it goes 0→1 and we send
+/// `SUBSCRIBE` to the broker; plugin B subscribing to the same
+/// filter goes 1→2 and we don't talk to the broker. When B exits,
+/// 2→1; when A exits, 1→0 and we send `UNSUBSCRIBE`. Without this,
+/// the broker keeps delivering messages that no plugin handles
+/// after the last subscriber dies (M5a W3 — debt #7 closure).
 #[derive(Debug)]
 pub struct MqttBroker {
     client: AsyncClient,
     router: MqttRouter,
+    filter_refcount: RwLock<HashMap<String, usize>>,
 }
 
 impl MqttBroker {
@@ -231,7 +255,11 @@ impl MqttBroker {
         let opts = mqtt_options(&cfg).context("build MQTT options")?;
         let (client, eventloop) = AsyncClient::new(opts, 64);
         spawn_eventloop(eventloop, router.clone());
-        Ok(Arc::new(Self { client, router }))
+        Ok(Arc::new(Self {
+            client,
+            router,
+            filter_refcount: RwLock::new(HashMap::new()),
+        }))
     }
 
     /// Router handle for plugins calling `mqtt::subscribe` — they
@@ -247,17 +275,91 @@ impl MqttBroker {
     /// this call inside `mqtt::Host::subscribe`; this method is the
     /// last link in the chain.
     ///
-    /// Duplicate subscriptions are broker-side no-ops — we don't
-    /// dedupe on the host side for simplicity.
+    /// Refcounted: only the 0→1 transition issues an actual
+    /// `SUBSCRIBE` packet to the broker. Subsequent plugins that
+    /// register the same filter just bump the count, avoiding
+    /// duplicate broker traffic.
     ///
     /// # Errors
     /// Propagates `rumqttc::ClientError` — channel-full or shutting
     /// down conditions on the AsyncClient's request queue.
     pub async fn subscribe_filter(&self, filter: &str) -> Result<()> {
-        self.client
-            .subscribe(filter, QoS::AtLeastOnce)
-            .await
-            .with_context(|| format!("broker subscribe {filter}"))
+        let send_subscribe = {
+            #[allow(clippy::unwrap_used)]
+            let mut counts = self.filter_refcount.write().unwrap();
+            let entry = counts.entry(filter.to_owned()).or_insert(0);
+            *entry += 1;
+            *entry == 1
+        };
+        if send_subscribe {
+            self.client
+                .subscribe(filter, QoS::AtLeastOnce)
+                .await
+                .with_context(|| format!("broker subscribe {filter}"))?;
+        } else {
+            tracing::debug!(
+                filter,
+                "mqtt subscribe: refcount-only bump (broker already subscribed)"
+            );
+        }
+        Ok(())
+    }
+
+    /// Drop one reference to `filter`. When the count reaches zero
+    /// the broker is told to stop forwarding (`UNSUBSCRIBE`).
+    /// Idempotent + safe to call on a filter the broker has never
+    /// seen — that just yields the no-op path.
+    ///
+    /// Called by the supervisor on plugin exit, once per filter the
+    /// router returned from `unregister(plugin_id)`. M5a W3 — debt
+    /// #7 closure.
+    ///
+    /// # Errors
+    /// Propagates `rumqttc::ClientError` from the unsubscribe call.
+    pub async fn unsubscribe_filter(&self, filter: &str) -> Result<()> {
+        let send_unsubscribe = {
+            #[allow(clippy::unwrap_used)]
+            let mut counts = self.filter_refcount.write().unwrap();
+            match counts.get_mut(filter) {
+                Some(count) if *count > 1 => {
+                    *count -= 1;
+                    false
+                }
+                Some(_) => {
+                    counts.remove(filter);
+                    true
+                }
+                None => {
+                    tracing::warn!(filter, "mqtt unsubscribe: filter not in refcount");
+                    false
+                }
+            }
+        };
+        if send_unsubscribe {
+            self.client
+                .unsubscribe(filter)
+                .await
+                .with_context(|| format!("broker unsubscribe {filter}"))?;
+        } else {
+            tracing::debug!(
+                filter,
+                "mqtt unsubscribe: refcount-only drop (broker still has subscribers)"
+            );
+        }
+        Ok(())
+    }
+
+    /// Read-only view of the per-filter refcount. Used by tests + a
+    /// future `iotctl plugin list --verbose` slice.
+    #[must_use]
+    pub fn filter_refcount(&self, filter: &str) -> usize {
+        #[allow(clippy::unwrap_used)]
+        self.filter_refcount
+            .read()
+            .unwrap()
+            .get(filter)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Publish on the broker at QoS 1.
@@ -426,8 +528,104 @@ mod tests {
         router.register("p2", "e/f", tx2);
         assert_eq!(router.len(), 3);
 
-        router.unregister("p1");
+        let removed = router.unregister("p1");
         assert_eq!(router.len(), 1);
+        // Caller (the supervisor) needs the filter list so it can
+        // decrement broker-side refcount per filter.
+        let mut sorted = removed;
+        sorted.sort();
+        assert_eq!(sorted, vec!["a/b".to_owned(), "c/d".to_owned()]);
+    }
+
+    #[test]
+    fn unregister_returns_empty_for_unknown_plugin() {
+        let router = MqttRouter::new();
+        let (tx, _rx) = mpsc::channel(8);
+        router.register("p1", "a/b", tx);
+
+        let removed = router.unregister("p2");
+        assert!(removed.is_empty(), "no filters for unknown plugin");
+        assert_eq!(router.len(), 1, "p1's filter untouched");
+    }
+
+    // -------------------------------------------------------- refcount tests
+    //
+    // These exercise the MqttBroker's filter_refcount field directly
+    // by constructing a broker that never polls its eventloop. The
+    // AsyncClient's subscribe/unsubscribe queue calls through a bounded
+    // mpsc — they succeed regardless of broker connectivity since the
+    // eventloop's the thing that fails noisily on no-broker.
+
+    fn synthetic_broker() -> Arc<MqttBroker> {
+        let opts = MqttOptions::new("test", "127.0.0.1", 18800);
+        let (client, mut eventloop) = AsyncClient::new(opts, 64);
+        // The eventloop *must* be polled or the client's request
+        // channel closes immediately ("Failed to send mqtt requests
+        // to eventloop"). Drain it forever and ignore connect errors
+        // — we don't want a real broker for these unit tests.
+        tokio::spawn(async move {
+            loop {
+                let _ = eventloop.poll().await;
+            }
+        });
+        Arc::new(MqttBroker {
+            client,
+            router: MqttRouter::new(),
+            filter_refcount: RwLock::new(HashMap::new()),
+        })
+    }
+
+    #[tokio::test]
+    async fn refcount_increments_on_subscribe_and_only_first_hits_broker() {
+        let broker = synthetic_broker();
+        broker.subscribe_filter("rtl_433/+").await.expect("first");
+        broker.subscribe_filter("rtl_433/+").await.expect("second");
+        broker.subscribe_filter("rtl_433/+").await.expect("third");
+        assert_eq!(broker.filter_refcount("rtl_433/+"), 3);
+        // The broker-side debug log discriminates "real" from
+        // "refcount-only" subscribes; we don't introspect logs here,
+        // but the refcount itself is the user-visible signal.
+    }
+
+    #[tokio::test]
+    async fn refcount_drops_on_unsubscribe_and_only_last_hits_broker() {
+        let broker = synthetic_broker();
+        broker.subscribe_filter("rtl_433/+").await.unwrap();
+        broker.subscribe_filter("rtl_433/+").await.unwrap();
+        broker.subscribe_filter("rtl_433/+").await.unwrap();
+        assert_eq!(broker.filter_refcount("rtl_433/+"), 3);
+
+        broker.unsubscribe_filter("rtl_433/+").await.unwrap();
+        assert_eq!(broker.filter_refcount("rtl_433/+"), 2);
+        broker.unsubscribe_filter("rtl_433/+").await.unwrap();
+        assert_eq!(broker.filter_refcount("rtl_433/+"), 1);
+        broker.unsubscribe_filter("rtl_433/+").await.unwrap();
+        // 1→0 transition removes the key entirely.
+        assert_eq!(broker.filter_refcount("rtl_433/+"), 0);
+    }
+
+    #[tokio::test]
+    async fn unsubscribe_unknown_filter_is_noop() {
+        let broker = synthetic_broker();
+        // Never subscribed — unsubscribe is a no-op (warns at host
+        // level, doesn't error).
+        broker.unsubscribe_filter("never/seen").await.unwrap();
+        assert_eq!(broker.filter_refcount("never/seen"), 0);
+    }
+
+    #[tokio::test]
+    async fn refcount_independent_per_filter() {
+        let broker = synthetic_broker();
+        broker.subscribe_filter("a/+").await.unwrap();
+        broker.subscribe_filter("a/+").await.unwrap();
+        broker.subscribe_filter("b/+").await.unwrap();
+
+        assert_eq!(broker.filter_refcount("a/+"), 2);
+        assert_eq!(broker.filter_refcount("b/+"), 1);
+
+        broker.unsubscribe_filter("a/+").await.unwrap();
+        assert_eq!(broker.filter_refcount("a/+"), 1);
+        assert_eq!(broker.filter_refcount("b/+"), 1);
     }
 
     // -------------------------------------------------------- broker config

@@ -11,6 +11,7 @@ pub mod capabilities;
 pub mod component;
 pub mod manifest;
 pub mod mqtt;
+pub mod mqtt_acl;
 pub mod runtime;
 pub mod supervisor;
 

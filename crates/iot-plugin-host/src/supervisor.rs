@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result};
 use wasmtime::Engine;
 
-use crate::runtime::{spawn_plugin_task, PluginHandle};
+use crate::runtime::{spawn_plugin_task, PluginHandle, DEFAULT_FUEL_PER_CALL};
 use crate::{load_plugin_dir, HostBindings};
 
 /// Marker filename inside `<plugin_dir>/<id>/` recording that the host
@@ -233,7 +233,16 @@ pub async fn supervise(engine: Engine, install_dir: PathBuf, bindings: HostBindi
             };
 
         tracing::info!(plugin = %manifest.id, version = %manifest.version, "plugin starting");
-        let PluginHandle { id, tx, join } = spawn_plugin_task(manifest.id.clone(), store, plugin);
+        // Per-call fuel budget: manifest's resources.fuel_max if set, else
+        // the host default. Refilled by the runtime task before each guest
+        // invocation (M5a W3 — debt #6 closure).
+        let fuel_per_call = if manifest.resources.fuel_max > 0 {
+            manifest.resources.fuel_max
+        } else {
+            DEFAULT_FUEL_PER_CALL
+        };
+        let PluginHandle { id, tx, join } =
+            spawn_plugin_task(manifest.id.clone(), store, plugin, fuel_per_call);
 
         // We drop `tx` *after* `join.await` so the channel stays open for
         // the full task lifetime — otherwise the task would see a closed
@@ -244,8 +253,21 @@ pub async fn supervise(engine: Engine, install_dir: PathBuf, bindings: HostBindi
         // Flush any MQTT router registrations this incarnation left
         // behind. On restart we'll register fresh; without this, stale
         // entries hold a dead tx and get pruned lazily on next dispatch.
+        // Also drop the broker-side refcount for each filter the plugin
+        // held — the last subscriber leaving triggers an UNSUBSCRIBE so
+        // the broker stops delivering messages no one will handle (M5a
+        // W3 — debt #7 closure).
         if let Some(broker) = bindings.mqtt.as_ref() {
-            broker.router().unregister(&id);
+            for filter in broker.router().unregister(&id) {
+                if let Err(e) = broker.unsubscribe_filter(&filter).await {
+                    tracing::warn!(
+                        plugin = %id,
+                        filter = %filter,
+                        error = %format!("{e:#}"),
+                        "broker unsubscribe failed during plugin exit cleanup"
+                    );
+                }
+            }
         }
 
         match outcome {

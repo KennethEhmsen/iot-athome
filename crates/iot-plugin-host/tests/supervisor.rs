@@ -20,7 +20,7 @@
 
 use std::path::PathBuf;
 
-use iot_plugin_host::runtime::{spawn_plugin_task, PluginCommand};
+use iot_plugin_host::runtime::{spawn_plugin_task, PluginCommand, DEFAULT_FUEL_PER_CALL};
 use iot_plugin_host::supervisor::{self, DLQ_MARKER_FILENAME};
 use iot_plugin_host::{build_engine, load_plugin_dir, HostBindings};
 
@@ -91,7 +91,7 @@ async fn plugin_task_cleanly_shuts_down_on_command() {
         .expect("load demo-echo");
     assert_eq!(manifest.id, "demo-echo");
 
-    let handle = spawn_plugin_task(manifest.id.clone(), store, plugin);
+    let handle = spawn_plugin_task(manifest.id.clone(), store, plugin, DEFAULT_FUEL_PER_CALL);
 
     // Send Shutdown. The task's init() runs before the loop polls, so
     // shutdown actually arrives after init completes. That's fine —
