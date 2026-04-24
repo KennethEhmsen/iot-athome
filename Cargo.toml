@@ -27,6 +27,10 @@ exclude = [
   # z2m migrated from a native tokio sidecar (M1) to a WASM plugin
   # against the host MQTT + registry capabilities (M2 W4, ADR-0013).
   "plugins/zigbee2mqtt-adapter",
+  # rtl_433 SDR adapter (M5a W3.4, second WASM plugin) — same shape
+  # as z2m: host MQTT capability + bus.publish + bus-watcher auto-
+  # register. ABI 1.3.0.
+  "plugins/sdr433-adapter",
 ]
 
 [workspace.package]

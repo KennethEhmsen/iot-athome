@@ -1,0 +1,49 @@
+# IoT-AtHome rtl_433 SDR adapter (WASM plugin, second of the M5a W3 set).
+#
+# Subscribes to rtl_433's `events` JSON-mode MQTT output (default topic
+# pattern `rtl_433/+`) and publishes one EntityState per recognised
+# field on `device.sdr433.<model>-<id>[-<channel>].<entity>.state`.
+# The iot-registry bus-watcher (M3 W1.2) auto-registers each
+# `(sdr433, <model>-<id>[-<channel>])` pair on first publish — no
+# explicit registry capability needed (gone in ABI 1.3.0 / M5a W1).
+#
+# Per-plugin NATS user JWT minted by `iotctl plugin install` against
+# the operator-signed account at install time (M5a W1).
+
+schema_version: 1
+id: sdr433-adapter
+name: rtl_433 SDR Adapter
+version: 0.1.0
+description: >
+  Bridges rtl_433 MQTT events into canonical EntityState bus events.
+  Requires rtl_433 running externally with `-F mqtt://broker:1883,events`
+  (or equivalent), publishing JSON-shaped device events on `rtl_433/...`.
+authors: ["IoT-AtHome"]
+license: "Apache-2.0 OR MIT"
+
+runtime: wasm-component
+abi:
+  world: iot:plugin-host
+  version: 1.3.0
+entrypoint: plugin.wasm
+
+capabilities:
+  mqtt:
+    subscribe:
+      - "rtl_433/+"
+  bus:
+    publish:
+      - "device.sdr433.>"
+
+resources:
+  memory_mb_max: 64
+  cpu_pct_max: 10
+  fuel_max: 10000000
+
+signatures:
+  - mechanism: cosign-keyless
+    rekor_entry: "DEV-UNSIGNED"
+    identity: "dev@localhost"
+    issuer: "dev"
+
+sbom: sbom.cdx.json
