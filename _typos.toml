@@ -1,0 +1,42 @@
+# typos linter config (crate-ci/typos@v1, run from preflight in CI).
+#
+# We rely on the upstream dictionary for almost everything; the entries
+# below are the few product / model names whose spelling matches a
+# common typo and would block the build otherwise.
+
+[default.extend-identifiers]
+# Honeywell ActivLink — door/contact sensor product name. The substring
+# "Activ" looks like a misspelling of "Active" to typos. Used in the
+# rtl_433 SDR adapter's translator (M5a W3.4) device-shape examples.
+ActivLink = "ActivLink"
+
+[default.extend-words]
+# Eclipse Mosquitto — MQTT broker product name. typos' default
+# dictionary corrects "Mosquitto" → "Mosquito" (the insect spelling),
+# but the product is canonically spelled with two t's. Referenced
+# across docs (M5-PLAN, STATUS, ADR-0013) and CLI help text.
+Mosquitto = "Mosquitto"
+mosquitto = "mosquitto"
+# "mis-config" (and other "mis-" hyphenations) — the dictionary
+# suggests "miss" / "mist" but our usage is the standard English
+# prefix. ADR-0010 has one occurrence.
+mis = "mis"
+# AFE — Analog Front-End, standard EE term. typos suggests "SAFE".
+# Used in the design-doc-builder section about sensor / AFE choice.
+AFE = "AFE"
+# "leafs" used as the plural in our subject-tree taxonomy (graph
+# terminology, not botanical). ADR-0004 §"Device leafs".
+leafs = "leafs"
+# "OTAs" — verbed acronym, "to OTA-update". Design-doc-builder uses
+# "OTAs to the ESP32". typos tokenizes on case boundaries, so "OT"
+# (the leading two-letter chunk before the "As") needs an explicit
+# allowance — without it the linter suggests "TO/OF/OR/NOT/IT".
+OTAs = "OTAs"
+OT = "OT"
+# BACnet — building-automation network protocol. Tokenizes as BA +
+# Cnet; the BA chunk would otherwise suggest BY/BE.
+BACnet = "BACnet"
+BA = "BA"
+# "Unparseable" — accepted English alternative spelling alongside
+# "Unparsable". Used in iot-config doc comments.
+Unparseable = "Unparseable"
