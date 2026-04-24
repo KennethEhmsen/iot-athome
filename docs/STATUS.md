@@ -1,10 +1,10 @@
 # IoT-AtHome — Project Status
 
-**As of:** 2026-04-24 (post-M4)
-**Head:** `8237764` (M4 kickoff: plan, registry gRPC server interceptor, deprecation log)
-**Shipped releases:** `v0.1.0-m1` (2026-04-21), `v0.2.0-m2` (2026-04-23), `v0.3.0-m3` (2026-04-23), `v0.4.0-m4` (2026-04-24)
-**Next release target:** `v0.5.0-m5`
-**Commits since M1:** 40 · **Commits since M3:** 3
+**As of:** 2026-04-24 (post-M5a)
+**Head:** `24e7f3e` (M5a W4.1: TimescaleDB optional long-term history backend)
+**Shipped releases:** `v0.1.0-m1` (2026-04-21), `v0.2.0-m2` (2026-04-23), `v0.3.0-m3` (2026-04-23), `v0.4.0-m4` (2026-04-24), `v0.5.0-m5a` (2026-04-24)
+**Next release target:** Command Central v1 PWA (own milestone, M5a.5 / pre-M5b)
+**Commits since M4:** 8
 
 > This file is a point-in-time snapshot. Regenerate before every milestone
 > boundary. Consult `docs/Mn-PLAN.md` + `docs/Mn-RETROSPECTIVE.md` + `docs/adr/`
@@ -14,45 +14,33 @@
 
 ## Executive summary
 
-M4 **shipped** — and honestly re-scoped. Entering the session it looked
-like M4 would absorb the M3 W3 carry-overs (Envoy, Timescale, Command
-Central, 2nd adapter) + the original M4 edge-ML plugins. Two
-discoveries reshaped the target:
+M5a **shipped** — the code-only half of M5, formally split out at
+planning time so each half can ship on its own cadence. **15 of 17
+M5a items closed in 8 commits over ~1 day**, plus the 2 deferred
+items have explicit next-milestone targets:
 
-1. **Envoy was already shipped** — the dev compose stack's Envoy
-   service + `envoy.yaml` (mTLS terminator, OTel tracing, WS upgrade
-   routing, Keycloak proxy) was in place since M1 W1. An audit, not a
-   build.
-2. **Edge-ML plugins are hardware + model-bound** — water-meter CV
-   needs an ESP32-CAM + trained TFLM classifier; 3-phase power needs
-   an ESP32-S3 + ATM90E32 + CT/VT provisioning; NILM needs the sensor
-   plugins shipping first to generate training data. Shoehorning
-   these into a code-only milestone would produce scaffolds, not
-   plugins. They move to **M5**.
+* **Closed (15):** broker decentralized auth (retires ADR-0011);
+  ABI 1.3.0 removing `registry::upsert-device`; CEL interpreter
+  swap (cel-interpreter 0.10 behind the existing facade); wildcard
+  JetStream replay; per-call fuel refuel; MQTT sub-refcount with
+  last-subscriber `UNSUBSCRIBE`; manifest-driven Mosquitto ACL via
+  `iotctl mosquitto regen-acl`; the `sdr433-adapter` 2nd WASM plugin
+  (now 3 plugins ship: demo-echo, z2m, sdr433); optional
+  TimescaleDB long-term history backend (`iot-history` crate +
+  gateway `GET /devices/{id}/history` endpoint + compose `history`
+  profile).
+* **Deferred:** Command Central v1 PWA (multi-session — full PWA
+  app + service worker + ephemeral PIN auth + room-scoped JWTs +
+  tablet-friendly tile UI; gets its own dedicated milestone). M5b
+  hardware/voice arcs unchanged (edge-ML plugin family, voice
+  pipeline).
 
-What M4 actually closes: the three **observability + auth clarity
-items** from the M3 retro's architectural-debts list.
+**8 of 10 M4-retro architectural debts retired in M5a.** Remaining:
+#9 SLSA hard-gate (M6 target), #2/#3 already shipped pre-M5a.
 
-**Shipped slices (3 over 1 session):**
-- **Registry gRPC server interceptor** — symmetric to the client-side
-  interceptor shipped post-v0.3.0-m3. Each `RegistryService` handler
-  (upsert/get/list/delete) scopes its body in
-  `iot_observability::traceparent::with_context(extract_ctx(…), …)`.
-  Panel → gateway HTTP → gateway tonic client → registry server →
-  registry bus watcher now share one trace id across every hop.
-- **`registry::upsert-device` deprecation log** — host capability
-  still works (z2m keeps calling it as belt-and-braces), but the
-  handler fires a one-shot `registry.deprecated` warn log per host
-  lifetime. M5 / ABI 1.3.0 removes it.
-- **`docs/M4-PLAN.md`** — honest re-scope document.
-
-Everything else from the original M4 plan that didn't ship is
-deferred with an explicit M5 target. This is not slippage — it's a
-recognition that the items belong in M5 alongside the voice / NILM
-work they naturally compose with.
-
-Local verification: **111/111 workspace tests, clippy `-D warnings`
-clean, cargo-deny clean**.
+Local verification: **138/138 workspace tests + 14 plugin-local
+sdr433 tests, clippy `-D warnings` clean, cargo-deny clean
+(7 documented advisory ignores).**
 
 ---
 
@@ -64,79 +52,151 @@ clean, cargo-deny clean**.
 | **M2 — Plugin SDK + Wasmtime Host + Real Plugins** | ✅ shipped 2026-04-23 (`v0.2.0-m2`) | `docs/M2-RETROSPECTIVE.md` |
 | **M3 — Automation Engine + Observability Foundations** | ✅ shipped 2026-04-23 (`v0.3.0-m3`) | `docs/M3-RETROSPECTIVE.md` |
 | **M4 — M3 carry-over closures** | ✅ shipped 2026-04-24 (`v0.4.0-m4`) | `docs/M4-RETROSPECTIVE.md` |
-| **M5 — Edge-ML + voice + Command Central + Timescale + broker-JWT** | 📐 designed | design doc §4.5, §3.6, §7-§9 |
+| **M5a — Platform closure + 2nd adapter + optional history** | ✅ shipped 2026-04-24 (`v0.5.0-m5a`) | `docs/M5a-RETROSPECTIVE.md` |
+| **Command Central v1 PWA** | 📐 designed (M5-PLAN W4); next dedicated arc | `docs/M5-PLAN.md` § W4 |
+| **M5b — Edge-ML + voice + NILM** | 📐 designed | `docs/M5-PLAN.md` § M5b preview |
 | **M6 — Hardening + certification** | 📐 designed | design doc §10 |
 
 ---
 
-## What M4 delivered
+## What M5a delivered
 
-### Cross-service trace propagation, closed
+### Broker decentralized auth (W1.1-7)
 
-`panel → gateway (HTTP middleware) → gateway tonic client
-(post-v0.3 client interceptor) → registry gRPC server (M4 handler
-wrap) → registry bus watcher (post-v0.3 subscriber wrap) → automation
-engine (post-v0.3 subscriber wrap) → gateway WS subscriber
-(post-v0.3)`
+`iot_bus::jwt` extended with `issue_account_jwt` + `format_creds_file`
++ `verify_account_jwt`. `iotctl nats {bootstrap, mint-user}`
+subcommands. `iotctl plugin install --account-seed` post-install
+hook (env `IOT_NATS_ACCOUNT_SEED`). `mint.sh` calls `iotctl nats
+bootstrap` after the mTLS bundle pass. NATS server config flips
+from `accounts {} no_auth_user: dev` to `include
+"certs/resolver.conf"`. `iot_bus::Config` gains `creds_path` (env
+`IOT_NATS_CREDS`); `Bus::connect` calls
+`ConnectOptions::credentials_file` when set. **ADR-0011 status →
+Superseded by [M5a W1].**
 
-Every hop scopes the task-local TraceContext. Nothing drops, nothing
-mints a fresh root mid-chain unless the inbound metadata is missing.
+### ABI 1.3.0 — `registry::upsert-device` removed (W1.8)
 
-### `registry::upsert-device` on its deprecation path
+Breaking package version bump in `schemas/wit/iot-plugin-host.wit`.
+`interface registry` deleted; `import registry` dropped from
+`world plugin`. Per-package note explains the major-N + N-1
+support rule. `iot-plugin-host` drops the entire `registry::Host`
+impl + the `REGISTRY_DEPRECATED_LOGGED` OnceLock from the M4
+warn-and-continue path. z2m adapter migrated: manifest abi.version
+1.2.0 → 1.3.0, package version 0.2.0 → 0.3.0,
+`capabilities.registry` block dropped, `registry::upsert_device`
+call removed. The bus-watcher auto-register path takes over.
 
-The M2-era host capability (plugin-side `registry.upsert()`) still
-works — z2m keeps calling it as belt-and-braces. But `iot-plugin-host`
-fires a one-shot `registry.deprecated` warning per host lifetime
-naming M3 W1.2 bus-watcher auto-registration as the replacement path
-+ M5 / ABI 1.3.0 as the hard-removal point. Gated on a `OnceLock<()>`
-so chatty adapters don't flood.
+### Real CEL interpreter (W2.1-2)
 
-### Honest re-scope
+`iot-automation/src/expr.rs` now wraps `cel-interpreter` 0.10
+behind the same `parse(src) → Expr` / `eval_bool(&Expr, &json) →
+bool` facade. New rule-author surface: `in`, `has(...)`, `size(...)`,
+list literals, full arithmetic. Defensive `std::panic::catch_unwind`
+wrap on `Program::compile` because cel-interpreter's antlr4rust
+dep panics on input the lexer fails to tokenise. Workspace
+`Cargo.toml` profile overrides cap antlr4rust / cel-* debug info
+to `line-tables-only` (Windows MSVC PDB symbol cap LNK1318).
 
-`docs/M4-PLAN.md` explicitly calls out what was discovered shipped
-(Envoy) and what moves (edge-ML plugins, broker JWT wiring, 2nd
-adapter, Timescale, Command Central). No fake scaffolds.
+### Wildcard JetStream replay (W2.3-4)
+
+`iot_bus::jetstream::last_state_wildcard(pattern)` opens an
+ephemeral consumer with `DeliverPolicy::LastPerSubject` +
+`filter_subject = pattern`, drains every distinct subject's last
+message exactly once. Gateway WS handler branches on `*` / `>` in
+the topic filter — concrete subjects use the M3 `last_state()`
+single-fetch path, wildcards use the new helper.
+
+### Plugin-host polish (W3.1-3)
+
+* **Fuel refueling per call** — `runtime::DEFAULT_FUEL_PER_CALL = 10M`
+  (overridable via `manifest.resources.fuel_max`). `set_fuel` before
+  every guest invocation.
+* **MQTT sub-refcount** — `MqttBroker.filter_refcount: HashMap<String,
+  usize>`. Only 0→1 issues `SUBSCRIBE`; only 1→0 issues
+  `UNSUBSCRIBE`. `MqttRouter::unregister(plugin_id)` returns the
+  filters dropped so the supervisor can decrement.
+* **Manifest-driven Mosquitto ACL** — new
+  `iot_plugin_host::mqtt_acl::generate(user, &[&Manifest])` +
+  `iotctl mosquitto regen-acl` subcommand. Walks installed
+  plugins, unions their `mqtt.{subscribe,publish}` lists, writes a
+  Mosquitto-2.0 ACL file. Fail-closed when zero plugins installed.
+
+### `sdr433-adapter` (W3.4)
+
+New WASM plugin under `plugins/sdr433-adapter/` against ABI
+**1.3.0**. Mirrors z2m shape. MQTT subscribe `rtl_433/+`,
+JSON-envelope translator → canonical
+`device.sdr433.<model>-<id>[-<channel>].<entity>.state` publishes.
+Translator catalog covers 6 device shapes: temperature/humidity,
+door/window contact, TPMS pressure, rain gauges, energy/power
+monitors, water-meter pulse counters. `device_id_from_envelope`
+builds NATS-safe canonical ids. **3 plugins now ship in parallel**
+(demo-echo, z2m, sdr433-adapter).
+
+### Optional TimescaleDB long-term history (W4.1)
+
+New `iot-history` crate. `HistoryStore` wrapping a sqlx PgPool.
+`ensure_schema()` creates the `entity_state_history` table +
+`(device_id, ts DESC)` index + a guarded Timescale hypertable
+conversion (works on plain Postgres too — keeps the table without
+chunk pruning). `from_env()` reads `IOT_TIMESCALE_URL`, returns
+`Ok(None)` when unset (M3 SQLite-only path stays default).
+
+The registry's bus_watcher mirrors every recognised `device.>`
+publish via `BusWatcher::with_history(HistoryStore)`. The gateway
+exposes `GET /api/v1/devices/{id}/history?from=&to=&limit=` with
+stable error codes (`history.disabled` → 503,
+`history.bad_from`/`history.bad_to` → 400, `history.query_failed`
+→ 502). Compose stack adds a `timescale` service behind a
+`history` profile.
 
 ---
 
 ## Architecture snapshot
 
-### Code surface (13 crates + 2 shipping plugins + 1 scaffold + panel)
+### Code surface (14 crates + 3 shipping plugins + 1 scaffold + panel)
 
-| Crate | M4 touches |
+| Crate | M5a touches |
 |---|---|
-| `iot-registry` | `service.rs` — all 4 handlers extract `traceparent` from `tonic::metadata` and `with_context(ctx, …)` the body. |
-| `iot-plugin-host` | `component.rs` — `REGISTRY_DEPRECATED_LOGGED: OnceLock<()>` gates a one-shot deprecation warn on `upsert-device` calls. |
+| `iot-bus` | `jwt::issue_account_jwt` + `format_creds_file` + `verify_account_jwt`; `Config::creds_path` + `Bus::connect` calls `credentials_file`; `jetstream::last_state_wildcard` ephemeral consumer. |
+| `iot-history` | **New crate.** sqlx-Postgres `HistoryStore` with hypertable schema + record + fetch_range + prune_older_than + `from_env()`. |
+| `iot-registry` | `bus_watcher::with_history(HistoryStore)` builder; mirrors `device.>` publishes when configured. `lib.rs` run() init reads `IOT_TIMESCALE_URL`. |
+| `iot-gateway` | New `GET /api/v1/devices/{id}/history` handler. `AppState.history: Option<HistoryStore>`. WS handler wildcard-replay branch. |
+| `iot-automation` | `expr.rs` — full crate-roll into cel-interpreter 0.10 wrap behind unchanged facade. `cel-interpreter` workspace dep. |
+| `iot-plugin-host` | `runtime::DEFAULT_FUEL_PER_CALL` + per-call refuel; `MqttBroker.filter_refcount` + `unsubscribe_filter`; `MqttRouter::unregister` returns dropped filters; `registry::Host` impl removed. **New `mqtt_acl` module.** |
+| `iot-cli` | New `iotctl nats {bootstrap, mint-user}` + `iotctl mosquitto regen-acl` subcommands. `plugin install --account-seed` flag + post-install creds-mint hook. |
+| `iot-plugin-sdk-rust` | Doc comment refresh for ABI 1.3.0 surface. |
 
-Everything else (observability, automation, bus, gateway, CLI) is
-unchanged — M4 is composition of already-tested pieces.
-
-### End-to-end trace path (now complete through gRPC)
+### End-to-end paths (current as of v0.5.0-m5a)
 
 ```
-panel  ─GET /api/v1/devices──┐
-  (may send traceparent)     │
-                             ▼
-  gateway traceparent_mw → with_context(ctx) {
-                             handler body
-                             ─tonic client (interceptor stamps traceparent)→
-                                                                    │
-                                                                    ▼
-                                             registry gRPC server (extract_ctx + with_context)
-                                             │
-                                             ▼
-                                             handler body
-                                             .publish_proto(…) ← current() reads task-local
-                                             │
-                             .publish_proto(…)  ← current() reads task-local
-                           }
-                             │
-                        (traceparent header on bus messages, both sides)
-                             ▼
-  subscriber (registry bus_watcher / automation / gateway-WS) loop {
-      let ctx = extract_trace_context(&msg).unwrap_or_else(new_root);
-      with_context(ctx, handle(msg))   ← shipped post-v0.3.0-m3
-  }
+Plugin install:
+  iotctl nats bootstrap → operator/account keys + JWT + resolver.conf
+  iotctl plugin install <bundle> --account-seed <path>
+    → cosign verify → SBOM scan → manifest parse →
+      generate per-plugin nkey + ACL snapshot →
+      mint user JWT against account → write nats.creds (0600)
+
+Plugin runtime:
+  iot-plugin-host → reads IOT_NATS_CREDS at connect →
+    NATS server validates JWT against operator-signed account →
+    accepts connection.
+  Per call: store.set_fuel(fuel_per_call) → invoke guest →
+    capability checks on every host call.
+  Plugin exits → router.unregister(plugin_id) → broker.unsubscribe_filter()
+    for each filter (last subscriber leaving stops broker delivery).
+
+Bus → registry → optional history:
+  device.<plugin>.<id>.<entity>.state arrives →
+    bus_watcher.handle() bumps last_seen / auto-registers →
+    if history.is_some(): history.record(device_id, subject, payload)
+      → entity_state_history hypertable INSERT.
+
+Panel reload → gateway WS handler subscribes →
+  if topics contains '*' or '>': last_state_wildcard(topics) →
+    drain every subject's last message → forward to client.
+  else: last_state(topics) single-fetch → forward.
+  Then live subscription stream.
 ```
 
 ### Security & supply-chain posture
@@ -147,23 +207,25 @@ panel  ─GET /api/v1/devices──┐
 | Plugin sig verify at install | ✅ | Cosign ECDSA-P256 (pinned pubkey) |
 | SBOM CVE gate at install | ✅ | CycloneDX `.vulnerabilities[]` |
 | Audit hash chain tamper-detectable | ✅ | JCS + verify re-computes |
-| Per-plugin NATS identity | 🏗 | JWT minter shipped M3; server config flip + iotctl post-install slipped to M5 |
-| End-to-end traceparent | ✅ | **M4 closure** — server-side gRPC interceptor completes the path |
-| `registry::upsert-device` on deprecation path | ✅ | **New in M4** — deprecation log; removal M5 / ABI 1.3.0 |
+| Per-plugin NATS identity | ✅ | **NEW M5a** — `iotctl nats bootstrap` + per-plugin user JWTs |
+| End-to-end traceparent | ✅ | server-side gRPC interceptor M4 closure |
+| `registry::upsert-device` removed | ✅ | **M5a W1.8** ABI 1.3.0 |
+| Real CEL interpreter | ✅ | **NEW M5a** — cel-interpreter 0.10 |
+| Wildcard JetStream replay | ✅ | **NEW M5a** |
+| Per-call fuel refuel | ✅ | **NEW M5a** — 10M default, manifest-overrideable |
+| MQTT sub-refcount + exit-unsub | ✅ | **NEW M5a** |
+| Manifest-driven Mosquitto ACL | ✅ | **NEW M5a** — `iotctl mosquitto regen-acl` |
+| TimescaleDB long-term history | ✅ | **NEW M5a** — opt-in via `IOT_TIMESCALE_URL` |
 | Cosign keyless / Rekor | ⏸ | M6 |
+| SLSA provenance hard-gate | ⏸ | M6 (still `continue-on-error`) |
 
 ---
 
 ## ADR index
 
-13 ADRs accepted, no new ones in M4. Structural decisions were
-pre-approved by existing ADRs.
-
-ADR-0011 (dev bus auth) **stays active** through M5 — the cryptographic
-half of the retirement path shipped in M3 (`iot_bus::jwt::issue_user_jwt`
-minter has unit tests) but the wiring half (iotctl post-install + NATS
-server reconfig + dev cert mint script operator-keypair step) is a
-multi-file change that wants its own dedicated session.
+13 ADRs accepted. **ADR-0011 (dev bus auth) status flipped to
+Superseded by [M5a W1]** — full retirement note in the ADR file
+documents the two-step crypto-then-wiring path. No new ADRs in M5a.
 
 ---
 
@@ -172,76 +234,75 @@ multi-file change that wants its own dedicated session.
 | Boundary | Workspace tests |
 |---|---|
 | M1 shipped | 12 |
-| M2 shipped | 58 (+ 3 out-of-workspace plugin tests) |
-| M3 W1 end (audit JCS) | 68 |
-| M3 W2.1-2.2 (parser + engine) | 87 |
-| M3 W2.3-2.5 (iotctl + jetstream) | 103 |
-| M3 W2.6-2.8 + polish (traceparent + proto decode) | **111** |
-| M4 shipped | **111** (unchanged — M4 slices are composition of already-tested pieces) |
+| M2 shipped | 58 (+ 3 plugin-local) |
+| M3 shipped | 111 |
+| M4 shipped | 111 (composition of tested pieces) |
+| M5a W1 | 118 (+7 net; –2 capability tests on removed `registry::upsert`) |
+| M5a W2 | 122 (+4 CEL surface) |
+| M5a W3 (1+2) | 135 (+13: 5 mqtt refcount, 5 mqtt_acl, 3 mosquitto regen-acl) |
+| M5a W3.4 | 135 + 14 sdr433 plugin-local |
+| **M5a W4.1** | **138** (+3: 2 iot-history + 1 bus_watcher history-token) |
 
-Zero flakes in M4. All clippy / deny gates clean on every push.
-
----
-
-## Architectural debts (post-M4 priority order)
-
-Rolled forward. Status updates noted inline.
-
-1. Broker JWT bootstrap wiring — **M5 target**. Crypto half shipped M3.
-2. Subscriber-loop traceparent wrappers — ✅ shipped post-v0.3.0-m3.
-3. gRPC traceparent interceptors — ✅ client-side post-v0.3.0-m3; **server-side M4**.
-4. Hand-rolled expression subset vs. full CEL — **M5 target**. Drop-in replaceable behind the `parse`/`eval_bool` facade.
-5. Wildcard-filtered last-msg replay — **M5 target**. Concrete-subject replay covers the 80% case.
-6. Fuel refuel between plugin host calls — **M5 target**. Carried from M2.
-7. MQTT broker subscription sub-refcount + unsubscribe on plugin exit — backlog.
-8. Permissive Mosquitto ACL — **M5**. Manifest-derived ACLs at broker level.
-9. SLSA provenance still `continue-on-error: true` — **M6**. Private-repo block from M2.
-10. `registry::upsert-device` host capability redundant — ✅ **deprecation log shipped M4**; removal M5 / ABI 1.3.0.
+Zero workspace flakes during M5a. All clippy / deny gates clean on
+every push.
 
 ---
 
-## What ships next (M5)
+## Architectural debts (post-M5a)
 
-Every item M4 deferred, plus the original M4 edge-ML scope.
+Rolled forward with M5a closures marked.
 
-**Rollover debts (from M3 retro carried through M4):**
-1. Broker JWT bootstrap wiring — retires ADR-0011
-2. Real CEL interpreter for rules
-3. Wildcard-filtered last-msg replay
-4. Fuel refueling + MQTT unsubscribe
-5. `registry::upsert-device` capability removal (ABI 1.3.0)
+| # | Debt | Status |
+|---|---|---|
+| 1 | Broker JWT bootstrap wiring | ✅ **shipped M5a W1**; ADR-0011 → Superseded |
+| 2 | Subscriber-loop traceparent wrappers | ✅ shipped post-v0.3.0-m3 |
+| 3 | gRPC traceparent interceptors | ✅ client + server |
+| 4 | Real CEL interpreter | ✅ **shipped M5a W2** |
+| 5 | Wildcard last-msg replay | ✅ **shipped M5a W2** |
+| 6 | Fuel refuel between plugin host calls | ✅ **shipped M5a W3** |
+| 7 | MQTT sub-refcount / unsubscribe | ✅ **shipped M5a W3** |
+| 8 | Permissive Mosquitto ACL | ✅ **shipped M5a W3** |
+| 9 | SLSA provenance `continue-on-error` | M6 target |
+| 10 | `registry::upsert-device` host capability | ✅ **removed M5a W1.8** (ABI 1.3.0) |
 
-**Original M4 scope, consolidated:**
-6. Second adapter (433-SDR), as part of the edge-ML plugin family
-7. TimescaleDB optional backend
-8. Command Central v1 PWA
+Net 8 of 10 retired. Remaining: #9 SLSA M6.
 
-**Edge-ML plugin family** (design doc §7-§9):
-9. Water-meter CV (ESP32-CAM + TFLM digit classifier)
-10. Mains-power 3-phase (ESP32-S3 + ATM90E32)
-11. Heating flow/return ΔT + COP
-12. NILM training loop (hub-side Python + ONNX)
+---
 
-**Voice pipeline** (original M5):
-13. openWakeWord wake detection
-14. Whisper/Vosk STT
-15. Closed-domain NLU dispatcher
-16. Piper TTS responses
-17. llama.cpp Q4 fallback on Pi 5
+## What ships next
 
-M5 is therefore roughly **7 weeks** of scope, not the originally-planned
-4. A candidate split into M5a (edge-ML + Command Central + Timescale +
-broker-JWT finalization) and M5b (voice pipeline + NILM training loop)
-is worth considering at M5 planning time.
+**Command Central v1 PWA** — own dedicated milestone (M5a.5 or
+pre-M5b). Multi-session by itself: full PWA workspace + service
+worker + gateway PIN-issue endpoint + ephemeral room-scoped JWTs
++ tablet-friendly tile UI + WS auth re-wire. Scope unchanged from
+`docs/M5-PLAN.md` § W4.
+
+**M5b** — hardware-bound arcs running on separate calendars:
+
+* **Edge-ML plugin family** (design doc §7-§9):
+  - Water-meter CV (ESP32-CAM + TFLite Micro digit classifier)
+  - Mains-power 3-phase (ESP32-S3 + ATM90E32)
+  - Heating flow/return ΔT + COP
+  - NILM training loop (hub-side Python + ONNX)
+* **Voice pipeline** (original M5):
+  - openWakeWord, Whisper/Vosk, closed-domain NLU, Piper TTS,
+    llama.cpp Q4 fallback
+
+**M6** — Hardening + certification (per design doc §10):
+- Third-party pen test
+- ETSI EN 303 645 + OWASP ASVS L2 walkthrough
+- SLSA L3 hard-gate (debt #9 closure)
+- Cosign keyless / Rekor flow
+- Public vulnerability disclosure program
 
 ---
 
 ## How to regenerate this file
 
 ```bash
-git log --oneline v0.4.0-m4..HEAD | wc -l     # commits since latest tag
-ls docs/adr/ | wc -l                          # ADR count
-just ci-local                                  # test count at the tail
+git log --oneline v0.5.0-m5a..HEAD | wc -l     # commits since latest tag
+ls docs/adr/ | wc -l                            # ADR count
+just ci-local                                    # test count at the tail
 ```
 
 Update the dated header, the summary paragraph, the test-trajectory
