@@ -140,6 +140,14 @@ clap = { version = "4.5", features = ["derive", "env"] }
 # --- streams ---
 tokio-stream = "0.1"
 
+# --- expression / rule engine ---
+# Real CEL (Common Expression Language) interpreter, M5a W2 — replaces
+# the M3-era hand-rolled subset in iot-automation::expr behind the
+# existing `parse`/`eval_bool` facade. Picked from the cel-rust ecosystem
+# because it tracks the upstream proto3-CEL spec and ships with serde_json
+# `Value` interop (no glue layer needed).
+cel-interpreter = "0.10"
+
 # --- testing ---
 tokio-test = "0.4"
 testcontainers = "0.23"
@@ -197,8 +205,32 @@ debug = true
 
 [profile.dev]
 opt-level = 0
+# Full DWARF/PDB debug info for our own crates; keep heavy generated-code
+# deps (cel-interpreter's antlr4rust tree-builder is ~150k symbols) at
+# `line-tables-only` to stay under the Windows MSVC PDB symbol cap
+# (LNK1318). The override is per-package so backtraces in our crates
+# remain rich.
 debug = true
 incremental = true
 
+# antlr4rust ships with derive-heavy generated tree types that blow
+# past Windows linker's PDB symbol limit when full debug info is
+# emitted on every test target. Cap them to line tables; backtraces
+# inside antlr generated code are unreadable anyway.
+[profile.dev.package.antlr4rust]
+debug = "line-tables-only"
+[profile.dev.package.cel-parser]
+debug = "line-tables-only"
+[profile.dev.package.cel-interpreter]
+debug = "line-tables-only"
+
 [profile.test]
 opt-level = 1
+# Mirror the dev-profile cap: test binaries link the same antlr4rust
+# tree so the PDB pressure is identical.
+[profile.test.package.antlr4rust]
+debug = "line-tables-only"
+[profile.test.package.cel-parser]
+debug = "line-tables-only"
+[profile.test.package.cel-interpreter]
+debug = "line-tables-only"

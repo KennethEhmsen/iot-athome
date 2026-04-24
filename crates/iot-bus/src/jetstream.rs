@@ -77,6 +77,89 @@ impl Bus {
             Err(e) => Err(JetstreamError::LastMsg(e.to_string())),
         }
     }
+
+    /// Replay the last retained message for every subject matching a
+    /// NATS wildcard pattern (e.g. `device.>`, `device.zigbee2mqtt.*.*.state`).
+    ///
+    /// Backed by an ephemeral JetStream pull-consumer with
+    /// `DeliverPolicy::LastPerSubject` and `filter_subject = pattern`.
+    /// The consumer reads each subject's latest retained message
+    /// exactly once, then signals "no more" via `num_pending == 0`
+    /// — at which point the call returns. The consumer is dropped
+    /// (and the server collects it) when the consumer handle goes
+    /// out of scope at function end.
+    ///
+    /// Use this from the gateway WS handler when a panel client
+    /// subscribes to a wildcard subject — every device's last-known
+    /// state arrives before the live firehose kicks in.
+    ///
+    /// Each yielded entry is `(subject, payload)`. Order isn't
+    /// guaranteed across subjects (JetStream replays in stream-time
+    /// order, which is publish order, not subject order).
+    ///
+    /// # Errors
+    /// `GetStream` if the stream isn't present. `LastMsg` wraps
+    /// consumer-create + fetch-batch failures.
+    pub async fn last_state_wildcard(
+        &self,
+        pattern: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, JetstreamError> {
+        use async_nats::jetstream::consumer::{pull, AckPolicy, DeliverPolicy};
+        use futures::StreamExt as _;
+
+        let ctx = async_nats::jetstream::new(self.raw().clone());
+        let stream = ctx.get_stream(DEVICE_STATE_STREAM).await?;
+
+        // Ephemeral consumer (no durable name): server GCs it after
+        // inactivity. AckNone since we don't need redelivery for a
+        // one-shot replay.
+        let consumer = stream
+            .create_consumer(pull::Config {
+                deliver_policy: DeliverPolicy::LastPerSubject,
+                filter_subject: pattern.to_owned(),
+                ack_policy: AckPolicy::None,
+                inactive_threshold: std::time::Duration::from_secs(30),
+                ..pull::Config::default()
+            })
+            .await
+            .map_err(|e| JetstreamError::LastMsg(format!("create consumer: {e}")))?;
+
+        // Use the consumer's info for `num_pending` — that's the
+        // count of last-per-subject messages waiting. Bound the
+        // batch fetch by it; if zero, return early. `info()` takes
+        // `&mut self`; clone first so the underlying `consumer`
+        // remains usable for the subsequent `fetch()`.
+        let mut info_handle = consumer.clone();
+        let pending = info_handle
+            .info()
+            .await
+            .map_err(|e| JetstreamError::LastMsg(format!("consumer info: {e}")))?
+            .num_pending;
+        if pending == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Cap batch at a sensible limit; fetches above this would
+        // chunk into multiple calls in a real load scenario but
+        // wildcard panel-replay caps at the device count, which is
+        // O(100) for any reasonable home.
+        let batch_size = pending.min(1024);
+        let mut batch = consumer
+            .fetch()
+            .max_messages(usize::try_from(batch_size).unwrap_or(1024))
+            .messages()
+            .await
+            .map_err(|e| JetstreamError::LastMsg(format!("fetch batch: {e}")))?;
+
+        let mut out = Vec::with_capacity(usize::try_from(batch_size).unwrap_or(0));
+        while let Some(msg_res) = batch.next().await {
+            match msg_res {
+                Ok(msg) => out.push((msg.subject.to_string(), msg.payload.to_vec())),
+                Err(e) => return Err(JetstreamError::LastMsg(format!("stream item: {e}"))),
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// Public thin wrapper around `async_nats::jetstream` errors.

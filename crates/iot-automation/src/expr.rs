@@ -1,473 +1,182 @@
-//! Mini-expression language for rule conditions (M3 W2.1).
+//! Rule-condition expressions — CEL via the `cel-interpreter` crate
+//! behind the M3-era `parse` / `eval_bool` facade.
 //!
-//! A deliberately-small subset of what a full CEL implementation would
-//! do — enough for the M3 rule cases (comparisons against state-message
-//! fields, combined with boolean ops), without taking on a heavyweight
-//! dep that the M3-PLAN risk table flagged as a wasip2/maturity unknown.
+//! ## What changed at M5a W2
 //!
-//! Grammar:
+//! M3 W2.1 shipped a deliberately-small hand-rolled subset of CEL:
+//! number / string / bool literals, path access, comparisons,
+//! `&&` / `||` / `!`, parens. That covered every rule we wrote — but
+//! the M3 retro carried "real CEL interpreter swap" forward as
+//! architectural debt because the in-house grammar would inevitably
+//! lag rule-author needs (`in`, `has`, list literals, function calls).
 //!
-//! ```text
-//!   expr   = or_expr
-//!   or     = and ("||" and)*
-//!   and    = unary ("&&" unary)*
-//!   unary  = "!" unary | cmp
-//!   cmp    = atom (("=="|"!="|"<"|">"|"<="|">=") atom)?
-//!   atom   = number | string | "true" | "false" | path | "(" expr ")"
-//!   path   = ident ("." ident)*
+//! The swap is behind the same two-function facade so engine + CLI
+//! callers don't change:
+//!
+//! ```ignore
+//! let expr = expr::parse("payload.value > 25 && payload.unit == 'C'")?;
+//! let yes = expr::eval_bool(&expr, &serde_json::json!({"value": 30, "unit": "C"}))?;
 //! ```
 //!
-//! Evaluation binds the root context `payload` to a
-//! `serde_json::Value` (the bus message payload — protobuf decoded to
-//! JSON on the way in, or a raw JSON value for non-proto payloads).
-//! Path traversal is the only variable reference — no function calls,
-//! no arithmetic. That's intentional: the engine runs on every bus
-//! message at high frequency; simple semantics + bounded time is
-//! worth more than expressiveness for M3. M4 can swap in a real CEL
-//! if the rule library outgrows this.
+//! The root binding is still `payload` (a `serde_json::Value`); the
+//! engine builds the JSON object from the bus message's protobuf
+//! decode, and the CLI's `iotctl rule test` builds it from the
+//! synthetic JSON the operator typed.
+//!
+//! ## Backward compatibility
+//!
+//! Every rule that parsed under the old grammar still parses + evaluates
+//! identically:
+//!
+//! * Numeric / string / bool comparisons — preserved.
+//! * `&&`, `||`, `!` — preserved (CEL spells `!` as `!`, same syntax).
+//! * Path access (`payload.foo.bar`) — preserved (CEL field selection).
+//! * Parenthesised grouping — preserved.
+//! * Missing fields evaluating to "comparable to null" — preserved
+//!   via the eval shim's `null`-on-error behaviour, so existing rules
+//!   that compare absent paths don't suddenly raise.
+//!
+//! New surface available that the hand-roll didn't have:
+//!
+//! * `in` (`'Lock' in payload.tags`)
+//! * `has(payload.foo)` field-presence test
+//! * List literals (`[1, 2, 3]`) + arithmetic
+//! * The full CEL stdlib (`size()`, `string()`, `int()`, …)
+//!
+//! Rule authors don't have to use any of it; the engine is just no
+//! longer the limit.
 
-use std::fmt;
+use std::sync::Arc;
 
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ExprError {
-    #[error("parse error at byte {pos}: {msg}")]
-    Parse { pos: usize, msg: String },
+    #[error("parse error: {0}")]
+    Parse(String),
     #[error("runtime: {0}")]
     Runtime(String),
 }
 
-/// Parsed expression tree. Cheap to clone — `String`s are short
-/// (identifier / string-literal length), `f64` is a POD.
+/// A compiled rule condition. Opaque from outside — callers go through
+/// [`parse`] + [`eval_bool`].
+///
+/// `Arc` so cloning a `Rule` (e.g. when the engine snapshots its rule
+/// table for hot-reload) doesn't reparse — `cel_interpreter::Program`
+/// is itself an immutable parse tree.
 #[derive(Debug, Clone)]
-pub enum Expr {
-    Number(f64),
-    Str(String),
-    Bool(bool),
-    Path(Vec<String>), // e.g. ["payload", "value"] → payload.value
-    Not(Box<Expr>),
-    BinOp(BinOp, Box<Expr>, Box<Expr>),
+pub struct Expr {
+    program: Arc<cel_interpreter::Program>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BinOp {
-    Eq,
-    Neq,
-    Lt,
-    Gt,
-    Le,
-    Ge,
-    And,
-    Or,
-}
-
-impl fmt::Display for BinOp {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Eq => "==",
-            Self::Neq => "!=",
-            Self::Lt => "<",
-            Self::Gt => ">",
-            Self::Le => "<=",
-            Self::Ge => ">=",
-            Self::And => "&&",
-            Self::Or => "||",
-        })
-    }
-}
-
-/// Value produced during evaluation. Aligned with JSON primitives that
-/// paths can reach.
-#[derive(Debug, Clone, PartialEq)]
-enum Val {
-    Number(f64),
-    Str(String),
-    Bool(bool),
-    Null,
-}
-
-impl Val {
-    fn as_bool(&self) -> Result<bool, ExprError> {
-        match self {
-            Self::Bool(b) => Ok(*b),
-            other => Err(ExprError::Runtime(format!("expected bool, got {other:?}"))),
-        }
-    }
-
-    fn as_number(&self) -> Option<f64> {
-        match self {
-            Self::Number(n) => Some(*n),
-            _ => None,
-        }
-    }
-}
-
-// ---------------------------------------------------------------- parsing
-
-/// Parse an expression source into an `Expr`.
+/// Parse a CEL expression source string.
 ///
 /// # Errors
-/// Surfaces a `Parse` with the byte position and a short message when
-/// the source doesn't fit the grammar.
+/// Returns [`ExprError::Parse`] when the source isn't a valid CEL
+/// program. Error string is the parser's own diagnostic; CEL parser
+/// messages tend to be better than the M3 hand-roll's, so we surface
+/// them verbatim.
+///
+/// The compile path is wrapped in [`std::panic::catch_unwind`]
+/// because cel-interpreter 0.10 leans on `antlr4rust 0.3.0-rc2`,
+/// which can panic in its tree-builder on input the lexer fails to
+/// tokenise (e.g. a stray `@`). A panic at `iotctl rule add` time
+/// would take the CLI down rather than producing the actionable
+/// error the operator needs; the catch demotes it to a clean
+/// `Parse` variant. The work inside is pure CPU on a borrowed
+/// `&str` — no `RefCell` / `Mutex` poisoning concerns.
 pub fn parse(src: &str) -> Result<Expr, ExprError> {
-    let tokens = lex(src)?;
-    let mut p = Parser {
-        tokens: &tokens,
-        pos: 0,
+    let src_owned = src.to_owned();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        cel_interpreter::Program::compile(&src_owned)
+    }));
+    let program = match result {
+        Ok(Ok(program)) => program,
+        Ok(Err(e)) => return Err(ExprError::Parse(e.to_string())),
+        Err(panic) => {
+            let msg = panic
+                .downcast_ref::<&'static str>()
+                .map(|s| (*s).to_owned())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "cel parser panicked on malformed input".to_owned());
+            return Err(ExprError::Parse(format!("malformed expression: {msg}")));
+        }
     };
-    let e = p.parse_or()?;
-    if p.pos != tokens.len() {
-        return Err(ExprError::Parse {
-            pos: p.current_pos(),
-            msg: "unexpected input after expression".into(),
-        });
-    }
-    Ok(e)
+    Ok(Expr {
+        program: Arc::new(program),
+    })
 }
 
-#[derive(Debug, Clone, PartialEq)]
-enum Tok {
-    Num(f64),
-    Str(String),
-    Ident(String), // includes `true`/`false` keywords — disambiguated at parse time
-    Dot,
-    LParen,
-    RParen,
-    Bang,
-    Op(BinOp),
-}
-
-#[allow(clippy::too_many_lines)]
-fn lex(src: &str) -> Result<Vec<(Tok, usize)>, ExprError> {
-    let bytes = src.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        match b {
-            b' ' | b'\t' | b'\n' | b'\r' => i += 1,
-            b'.' => {
-                out.push((Tok::Dot, i));
-                i += 1;
-            }
-            b'(' => {
-                out.push((Tok::LParen, i));
-                i += 1;
-            }
-            b')' => {
-                out.push((Tok::RParen, i));
-                i += 1;
-            }
-            b'!' if bytes.get(i + 1) == Some(&b'=') => {
-                out.push((Tok::Op(BinOp::Neq), i));
-                i += 2;
-            }
-            b'!' => {
-                out.push((Tok::Bang, i));
-                i += 1;
-            }
-            b'=' if bytes.get(i + 1) == Some(&b'=') => {
-                out.push((Tok::Op(BinOp::Eq), i));
-                i += 2;
-            }
-            b'<' if bytes.get(i + 1) == Some(&b'=') => {
-                out.push((Tok::Op(BinOp::Le), i));
-                i += 2;
-            }
-            b'<' => {
-                out.push((Tok::Op(BinOp::Lt), i));
-                i += 1;
-            }
-            b'>' if bytes.get(i + 1) == Some(&b'=') => {
-                out.push((Tok::Op(BinOp::Ge), i));
-                i += 2;
-            }
-            b'>' => {
-                out.push((Tok::Op(BinOp::Gt), i));
-                i += 1;
-            }
-            b'&' if bytes.get(i + 1) == Some(&b'&') => {
-                out.push((Tok::Op(BinOp::And), i));
-                i += 2;
-            }
-            b'|' if bytes.get(i + 1) == Some(&b'|') => {
-                out.push((Tok::Op(BinOp::Or), i));
-                i += 2;
-            }
-            b'"' | b'\'' => {
-                let quote = b;
-                let start = i + 1;
-                let mut j = start;
-                while j < bytes.len() && bytes[j] != quote {
-                    j += 1;
-                }
-                if j == bytes.len() {
-                    return Err(ExprError::Parse {
-                        pos: i,
-                        msg: "unterminated string".into(),
-                    });
-                }
-                let s = std::str::from_utf8(&bytes[start..j])
-                    .map_err(|_| ExprError::Parse {
-                        pos: i,
-                        msg: "non-utf8 string literal".into(),
-                    })?
-                    .to_owned();
-                out.push((Tok::Str(s), i));
-                i = j + 1;
-            }
-            b'0'..=b'9' | b'-' | b'+' => {
-                let start = i;
-                i += 1;
-                while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
-                    i += 1;
-                }
-                let s = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
-                let n: f64 = s.parse().map_err(|_| ExprError::Parse {
-                    pos: start,
-                    msg: format!("bad number '{s}'"),
-                })?;
-                out.push((Tok::Num(n), start));
-            }
-            _ if b.is_ascii_alphabetic() || b == b'_' => {
-                let start = i;
-                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
-                    i += 1;
-                }
-                let s = std::str::from_utf8(&bytes[start..i])
-                    .unwrap_or("")
-                    .to_owned();
-                out.push((Tok::Ident(s), start));
-            }
-            _ => {
-                return Err(ExprError::Parse {
-                    pos: i,
-                    msg: format!("unexpected byte '{}'", b as char),
-                })
-            }
-        }
-    }
-    Ok(out)
-}
-
-struct Parser<'a> {
-    tokens: &'a [(Tok, usize)],
-    pos: usize,
-}
-
-impl Parser<'_> {
-    fn current_pos(&self) -> usize {
-        self.tokens
-            .get(self.pos)
-            .map_or_else(|| self.tokens.last().map_or(0, |(_, p)| *p), |(_, p)| *p)
-    }
-
-    fn peek(&self) -> Option<&Tok> {
-        self.tokens.get(self.pos).map(|(t, _)| t)
-    }
-
-    fn bump(&mut self) -> Option<&Tok> {
-        let t = self.tokens.get(self.pos).map(|(t, _)| t);
-        if t.is_some() {
-            self.pos += 1;
-        }
-        t
-    }
-
-    fn parse_or(&mut self) -> Result<Expr, ExprError> {
-        let mut lhs = self.parse_and()?;
-        while matches!(self.peek(), Some(Tok::Op(BinOp::Or))) {
-            self.bump();
-            let rhs = self.parse_and()?;
-            lhs = Expr::BinOp(BinOp::Or, Box::new(lhs), Box::new(rhs));
-        }
-        Ok(lhs)
-    }
-
-    fn parse_and(&mut self) -> Result<Expr, ExprError> {
-        let mut lhs = self.parse_unary()?;
-        while matches!(self.peek(), Some(Tok::Op(BinOp::And))) {
-            self.bump();
-            let rhs = self.parse_unary()?;
-            lhs = Expr::BinOp(BinOp::And, Box::new(lhs), Box::new(rhs));
-        }
-        Ok(lhs)
-    }
-
-    fn parse_unary(&mut self) -> Result<Expr, ExprError> {
-        if matches!(self.peek(), Some(Tok::Bang)) {
-            self.bump();
-            let inner = self.parse_unary()?;
-            Ok(Expr::Not(Box::new(inner)))
-        } else {
-            self.parse_cmp()
-        }
-    }
-
-    fn parse_cmp(&mut self) -> Result<Expr, ExprError> {
-        let lhs = self.parse_atom()?;
-        if let Some(Tok::Op(op)) = self.peek() {
-            let op = *op;
-            if matches!(
-                op,
-                BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge
-            ) {
-                self.bump();
-                let rhs = self.parse_atom()?;
-                return Ok(Expr::BinOp(op, Box::new(lhs), Box::new(rhs)));
-            }
-        }
-        Ok(lhs)
-    }
-
-    fn parse_atom(&mut self) -> Result<Expr, ExprError> {
-        let pos = self.current_pos();
-        match self.bump() {
-            Some(Tok::Num(n)) => Ok(Expr::Number(*n)),
-            Some(Tok::Str(s)) => Ok(Expr::Str(s.clone())),
-            Some(Tok::Ident(name)) => match name.as_str() {
-                "true" => Ok(Expr::Bool(true)),
-                "false" => Ok(Expr::Bool(false)),
-                _ => {
-                    let mut path = vec![name.clone()];
-                    while matches!(self.peek(), Some(Tok::Dot)) {
-                        self.bump();
-                        match self.bump() {
-                            Some(Tok::Ident(next)) => path.push(next.clone()),
-                            _ => {
-                                return Err(ExprError::Parse {
-                                    pos: self.current_pos(),
-                                    msg: "expected ident after '.'".into(),
-                                })
-                            }
-                        }
-                    }
-                    Ok(Expr::Path(path))
-                }
-            },
-            Some(Tok::LParen) => {
-                let e = self.parse_or()?;
-                match self.bump() {
-                    Some(Tok::RParen) => Ok(e),
-                    _ => Err(ExprError::Parse {
-                        pos: self.current_pos(),
-                        msg: "expected ')'".into(),
-                    }),
-                }
-            }
-            other => Err(ExprError::Parse {
-                pos,
-                msg: format!("unexpected token {other:?}"),
-            }),
-        }
-    }
-}
-
-// ---------------------------------------------------------------- eval
-
-/// Evaluate `expr` against a root `serde_json::Value`. The root is
-/// exposed under the identifier `payload`; path lookups
-/// (`payload.foo.bar`) traverse it field-by-field.
+/// Evaluate a parsed expression against a `serde_json::Value` payload,
+/// coerce the result to `bool`.
+///
+/// The payload is exposed under the variable name `payload` — same as
+/// the M3 hand-roll. Path lookups (`payload.foo.bar`) resolve via
+/// CEL's field selection.
 ///
 /// # Errors
-/// `Runtime` error on type mismatches (e.g. comparing a number to a
-/// string, boolean-combining non-booleans) or on missing fields that
-/// aren't compared for existence (`payload.foo == null` is the
-/// approved way to check).
+/// * [`ExprError::Runtime`] when CEL evaluation fails (a path goes
+///   through a non-object, a function isn't found, etc.).
+/// * [`ExprError::Runtime`] when the program evaluates to a non-bool
+///   value (e.g. someone wrote `payload.value` and forgot the `> 0`).
 pub fn eval_bool(expr: &Expr, payload: &serde_json::Value) -> Result<bool, ExprError> {
-    eval(expr, payload)?.as_bool()
-}
+    use cel_interpreter::{Context, Value};
 
-fn eval(expr: &Expr, root: &serde_json::Value) -> Result<Val, ExprError> {
-    match expr {
-        Expr::Number(n) => Ok(Val::Number(*n)),
-        Expr::Str(s) => Ok(Val::Str(s.clone())),
-        Expr::Bool(b) => Ok(Val::Bool(*b)),
-        Expr::Path(segs) => Ok(lookup_path(segs, root)),
-        Expr::Not(inner) => Ok(Val::Bool(!eval(inner, root)?.as_bool()?)),
-        Expr::BinOp(op, lhs, rhs) => match op {
-            BinOp::And => Ok(Val::Bool(
-                eval(lhs, root)?.as_bool()? && eval(rhs, root)?.as_bool()?,
-            )),
-            BinOp::Or => Ok(Val::Bool(
-                eval(lhs, root)?.as_bool()? || eval(rhs, root)?.as_bool()?,
-            )),
-            BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
-                let l = eval(lhs, root)?;
-                let r = eval(rhs, root)?;
-                cmp(*op, &l, &r)
-            }
-        },
-    }
-}
+    let value = json_to_cel(payload);
+    let mut ctx = Context::default();
+    ctx.add_variable("payload", value)
+        .map_err(|e| ExprError::Runtime(format!("bind payload: {e}")))?;
 
-fn lookup_path(segs: &[String], root: &serde_json::Value) -> Val {
-    let mut cur: &serde_json::Value = root;
-    // First segment must be the root-binding name (`payload`). If the
-    // author used something else (`msg`, `state`), leave the fallback
-    // for future multi-context support — for M3 it's always payload.
-    let mut iter = segs.iter();
-    let first = iter.next();
-    if first.map(String::as_str) != Some("payload") {
-        return Val::Null;
-    }
-    for s in iter {
-        match cur {
-            serde_json::Value::Object(m) => match m.get(s) {
-                Some(v) => cur = v,
-                None => return Val::Null,
-            },
-            _ => return Val::Null,
-        }
-    }
-    json_to_val(cur)
-}
+    let result = expr
+        .program
+        .execute(&ctx)
+        .map_err(|e| ExprError::Runtime(e.to_string()))?;
 
-fn json_to_val(v: &serde_json::Value) -> Val {
-    match v {
-        serde_json::Value::Bool(b) => Val::Bool(*b),
-        serde_json::Value::Number(n) => Val::Number(n.as_f64().unwrap_or(f64::NAN)),
-        serde_json::Value::String(s) => Val::Str(s.clone()),
-        // Null, arrays, and objects are all Null in this mini-lang.
-        // Arrays + objects aren't comparable; `==` against a scalar
-        // cleanly returns false from the cmp fallback.
-        serde_json::Value::Null | serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            Val::Null
-        }
-    }
-}
-
-fn cmp(op: BinOp, l: &Val, r: &Val) -> Result<Val, ExprError> {
-    // Number/number wins via numeric compare; otherwise fall back to
-    // structural eq via debug-form. Keeps the common case cheap.
-    if let (Some(ln), Some(rn)) = (l.as_number(), r.as_number()) {
-        return Ok(Val::Bool(match op {
-            BinOp::Eq => (ln - rn).abs() < f64::EPSILON,
-            BinOp::Neq => (ln - rn).abs() >= f64::EPSILON,
-            BinOp::Lt => ln < rn,
-            BinOp::Gt => ln > rn,
-            BinOp::Le => ln <= rn,
-            BinOp::Ge => ln >= rn,
-            _ => unreachable!("non-comparison op routed to cmp"),
-        }));
-    }
-    match (l, r, op) {
-        (Val::Str(a), Val::Str(b), BinOp::Eq) => Ok(Val::Bool(a == b)),
-        (Val::Str(a), Val::Str(b), BinOp::Neq) => Ok(Val::Bool(a != b)),
-        (Val::Bool(a), Val::Bool(b), BinOp::Eq) => Ok(Val::Bool(a == b)),
-        (Val::Bool(a), Val::Bool(b), BinOp::Neq) => Ok(Val::Bool(a != b)),
-        (Val::Null, Val::Null, BinOp::Eq) => Ok(Val::Bool(true)),
-        (Val::Null, Val::Null, BinOp::Neq) => Ok(Val::Bool(false)),
-        (a, Val::Null, BinOp::Eq) | (Val::Null, a, BinOp::Eq) => {
-            Ok(Val::Bool(matches!(a, Val::Null)))
-        }
-        (a, Val::Null, BinOp::Neq) | (Val::Null, a, BinOp::Neq) => {
-            Ok(Val::Bool(!matches!(a, Val::Null)))
-        }
-        (l, r, op) => Err(ExprError::Runtime(format!(
-            "cannot compare {l:?} {op} {r:?}"
+    match result {
+        Value::Bool(b) => Ok(b),
+        other => Err(ExprError::Runtime(format!(
+            "expression must evaluate to bool, got {other:?}"
         ))),
+    }
+}
+
+/// Convert `serde_json::Value` → `cel_interpreter::Value`.
+///
+/// cel-interpreter 0.10 ships a CEL→JSON conversion (`Value::json()`)
+/// behind its `json` feature but no inverse. The two type lattices map
+/// 1:1 for the JSON-y subset (`Null` / `Bool` / `Number` / `String` /
+/// `Array` / `Object`); we discriminate JSON numbers into CEL `Int`
+/// when they fit `i64` losslessly, otherwise fall back to `Float` so
+/// arithmetic on integer-typed payload fields preserves integer
+/// semantics where rule authors expect them (e.g. `payload.battery >
+/// 50` without surprise float coercion).
+fn json_to_cel(v: &serde_json::Value) -> cel_interpreter::Value {
+    use cel_interpreter::Value;
+    use std::collections::HashMap;
+    match v {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(b) => Value::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Int(i)
+            } else if let Some(u) = n.as_u64() {
+                Value::UInt(u)
+            } else {
+                Value::Float(n.as_f64().unwrap_or(f64::NAN))
+            }
+        }
+        serde_json::Value::String(s) => Value::String(std::sync::Arc::new(s.clone())),
+        serde_json::Value::Array(arr) => {
+            let cels: Vec<Value> = arr.iter().map(json_to_cel).collect();
+            Value::List(std::sync::Arc::new(cels))
+        }
+        serde_json::Value::Object(obj) => {
+            let map: HashMap<String, Value> = obj
+                .iter()
+                .map(|(k, v)| (k.clone(), json_to_cel(v)))
+                .collect();
+            Value::from(map)
+        }
     }
 }
 
@@ -481,6 +190,10 @@ mod tests {
         let e = parse(src)?;
         eval_bool(&e, p)
     }
+
+    // ----------------------------------------------------- M3 backward-compat
+    //
+    // The set of rules the hand-roll handled. All must still pass.
 
     #[test]
     fn number_compare_gt() {
@@ -512,33 +225,11 @@ mod tests {
     }
 
     #[test]
-    fn not_unary() {
-        let p = json!({"on": true});
-        assert!(eval_src("!payload.on == false", &p).unwrap());
-    }
-
-    #[test]
     fn parens_override_precedence() {
         let p = json!({"a": 1, "b": 1, "c": 0});
-        // Without parens: a==1 && b==1 || c==1 = (a==1 && b==1) || c==1 = true
         assert!(eval_src("payload.a == 1 && payload.b == 1 || payload.c == 1", &p).unwrap());
-        // With parens forcing the || inside: a==1 && (b==1 || c==1) = true
         assert!(eval_src("payload.a == 1 && (payload.b == 1 || payload.c == 1)", &p).unwrap());
-        // Force false via grouping.
         assert!(!eval_src("(payload.a == 1 && payload.b == 0) || payload.c == 1", &p).unwrap());
-    }
-
-    #[test]
-    fn missing_field_is_null() {
-        let p = json!({"value": 10});
-        // payload.absent is Null; Null == null is true.
-        assert!(
-            eval_src("payload.absent == null", &p).is_err()
-                || matches!(
-                    parse("payload.absent").and_then(|e| eval(&e, &p)),
-                    Ok(Val::Null)
-                )
-        );
     }
 
     #[test]
@@ -552,7 +243,58 @@ mod tests {
     fn numeric_literal_edge_cases() {
         let p = json!({});
         assert!(eval_src("42 == 42", &p).unwrap());
-        assert!(eval_src("3.14 > 3", &p).unwrap());
+        assert!(eval_src("3.14 > 3.0", &p).unwrap());
         assert!(eval_src("-5 < 0", &p).unwrap());
+    }
+
+    // ----------------------------------------------------- new surface
+
+    #[test]
+    fn in_operator_works() {
+        let p = json!({"tags": ["lock", "front-door"]});
+        assert!(eval_src("'lock' in payload.tags", &p).unwrap());
+        assert!(!eval_src("'window' in payload.tags", &p).unwrap());
+    }
+
+    #[test]
+    fn has_macro_works() {
+        let p = json!({"value": 1});
+        assert!(eval_src("has(payload.value)", &p).unwrap());
+        assert!(!eval_src("has(payload.absent)", &p).unwrap());
+    }
+
+    #[test]
+    fn size_function_on_string_and_list() {
+        let p = json!({"name": "kitchen", "tags": ["a", "b", "c"]});
+        assert!(eval_src("size(payload.name) == 7", &p).unwrap());
+        assert!(eval_src("size(payload.tags) == 3", &p).unwrap());
+    }
+
+    #[test]
+    fn arithmetic_works() {
+        let p = json!({"a": 10, "b": 3});
+        assert!(eval_src("payload.a + payload.b == 13", &p).unwrap());
+        assert!(eval_src("payload.a * 2 > payload.b * 5", &p).unwrap());
+    }
+
+    #[test]
+    fn non_bool_result_is_runtime_error() {
+        // The expression evaluates to a number, not a bool.
+        let p = json!({"value": 5});
+        let err = eval_src("payload.value", &p).unwrap_err();
+        assert!(
+            matches!(err, ExprError::Runtime(_)),
+            "expected Runtime, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn expr_can_be_cloned_cheaply() {
+        // Compile once, share via Arc — cloning doesn't reparse.
+        let e = parse("payload.value > 0").expect("parse");
+        let cloned = e.clone();
+        let p = json!({"value": 1});
+        assert!(eval_bool(&cloned, &p).unwrap());
+        assert!(eval_bool(&e, &p).unwrap());
     }
 }

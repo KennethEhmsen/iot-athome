@@ -97,17 +97,40 @@ async fn handle_socket(mut socket: WebSocket, topics: String, state: AppState) {
     };
     info!(topics, "ws client subscribed");
 
-    // Panel-survives-reload (M3 W2.5): if the subscription targets a
-    // concrete subject (no wildcards), replay the last retained
-    // message from the DEVICE_STATE JetStream first. Panel sees the
-    // current value within one RTT of connect; live updates flow
-    // afterwards via the core subscription.
+    // Panel-survives-reload: replay the last retained message(s)
+    // from the DEVICE_STATE JetStream before letting the live
+    // subscription stream further updates.
     //
-    // Wildcard patterns (`device.>` or `device.*.foo.bar.state`) get
-    // no replay here — the broader "last-per-subject across a filter"
-    // path wants a JetStream ephemeral consumer with
-    // DeliverLastPerSubject, which is the next slice.
-    if !topics.contains('*') && !topics.contains('>') {
+    // Two paths depending on the topic filter:
+    //   * Concrete subject (no wildcards) — `last_state(&topics)`
+    //     fetches the single retained message via raw-get RPC. M3
+    //     W2.5b shipped this.
+    //   * Wildcard pattern (`device.>`, `device.zigbee2mqtt.*.state`)
+    //     — `last_state_wildcard(&topics)` opens an ephemeral
+    //     JetStream consumer with `DeliverLastPerSubject` filtered by
+    //     the pattern, drains every distinct subject's last message
+    //     once, then drops the consumer. M5a W2 shipped this — closes
+    //     M4 architectural debt #5.
+    if topics.contains('*') || topics.contains('>') {
+        match bus.last_state_wildcard(&topics).await {
+            Ok(replays) => {
+                let count = replays.len();
+                for (subject, payload) in replays {
+                    let event = shape_event(&subject, "iot.device.v1.EntityState", &payload);
+                    if send_text(&mut socket, event.to_string()).await.is_err() {
+                        debug!("client dropped during wildcard replay");
+                        return;
+                    }
+                }
+                debug!(topics = %topics, count, "wildcard last-per-subject replay complete");
+            }
+            Err(e) => warn!(
+                topics = %topics,
+                error = %format!("{e:#}"),
+                "wildcard replay fetch failed"
+            ),
+        }
+    } else {
         match bus.last_state(&topics).await {
             Ok(Some(payload)) => {
                 // We don't have the original iot-type header in the
