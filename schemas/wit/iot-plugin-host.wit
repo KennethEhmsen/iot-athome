@@ -13,10 +13,24 @@
 //   1.1.0 — mqtt host interface + on-mqtt-message runtime export
 //           (ADR-0013, M2 W4).
 //   1.2.0 — registry host interface (transitional per ADR-0013);
-//           retires when M3 ships registry-side bus-driven
-//           auto-register, at which point plugins stop needing this
-//           capability.
-package iot:plugin-host@1.2.0;
+//           deprecated in M4 once M3 W1.2's registry bus-watcher
+//           shipped.
+//
+// Breaking-change major bumps:
+//   1.3.0 — removes the `registry` host interface. M3 W1.2's
+//           registry bus-watcher auto-registers any (integration,
+//           external_id) pair that surfaces on `device.>`; the
+//           explicit `registry::upsert-device` capability is now
+//           redundant. M4 shipped a one-shot deprecation warn from
+//           the host; M5a removes the import. Adapter plugins that
+//           still want to ensure registration "before first state
+//           publish" simply publish state — the registry catches up.
+//
+// Note: per ADR-0003 a host supports the latest major + one
+// previous for a major cycle. 1.2.0 plugins targeting `import
+// registry` are NOT loadable under a 1.3.0 host — there's no
+// minor-version compatibility story for capability removal.
+package iot:plugin-host@1.3.0;
 
 interface types {
     /// Dotted-namespace stable error code (see ADR-0008).
@@ -58,30 +72,15 @@ interface log {
     emit: func(level: level, target: string, message: string);
 }
 
-/// Registry (transitional, 1.2.0+): lets adapter plugins upsert
-/// devices + look them up by external-id. The host wraps a tonic gRPC
-/// client so the plugin doesn't have to link tonic / hyper / tokio
-/// (which wouldn't build for wasm32-wasip2 anyway).
-///
-/// Retired when M3 ships registry-side bus-driven auto-register —
-/// at that point the registry reads `device.*` bus events and
-/// registers unknown `(integration, external_id)` pairs on sight.
-/// Until then, this capability is how z2m etc. keep M1's
-/// upsert-on-first-sight ergonomics.
-interface registry {
-    use types.{plugin-error};
-
-    /// Upsert a device by `(integration, external-id)`. Returns the
-    /// registry-assigned ULID. Capability-checked against
-    /// `capabilities.registry.upsert`.
-    upsert-device: func(
-        integration: string,
-        external-id: string,
-        label: string,
-        manufacturer: string,
-        model: string,
-    ) -> result<string, plugin-error>;
-}
+// (Removed in 1.3.0 — see package-level breaking-change note above.)
+// The `registry` host interface previously offered an `upsert-device`
+// function that wrapped the host-side tonic gRPC client. M3 W1.2
+// shipped a registry bus-watcher that auto-registers any unknown
+// `(integration, external_id)` pair on the `device.>` subject space,
+// which makes the explicit upsert call redundant. Plugins migrate by
+// dropping the `registry` import + the manifest's
+// `capabilities.registry.upsert` flag; publishing on `device.<id>.state`
+// is enough to register the device.
 
 /// MQTT: the host owns one broker connection and multiplexes subscribe/
 /// publish across plugins. Plugins never see the broker socket or TLS
@@ -144,6 +143,5 @@ world plugin {
     import bus;
     import log;
     import mqtt;
-    import registry;
     export runtime;
 }

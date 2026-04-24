@@ -60,12 +60,13 @@ pub struct HostBindings {
     /// startup; pass a clone of the `Arc` into every `load_plugin_dir`
     /// call.
     pub mqtt: Option<Arc<crate::mqtt::MqttBroker>>,
-    /// gRPC channel to the registry service, reused across all
-    /// plugins. Plugins reach it via the `registry` host capability
-    /// (ABI 1.2.0+); `None` means "no registry configured" and the
-    /// capability impl returns a clear `registry.not_configured`
-    /// PluginError to any caller. Intended to be retired when M3
-    /// ships bus-driven auto-register (ADR-0013 Piece 2 §Consequences).
+    /// gRPC channel to the registry service. M2-era plugins reached
+    /// it via the `registry::upsert-device` host capability (ABI
+    /// 1.2.0); that capability went away in ABI 1.3.0 (M5a W1) — the
+    /// iot-registry bus-watcher (M3 W1.2) auto-registers devices
+    /// from `device.>` publishes instead. The field stays for
+    /// host-internal use (per-plugin admin RPCs in future) and may
+    /// drop entirely in a later major.
     pub registry: Option<tonic::transport::Channel>,
 }
 
@@ -144,11 +145,10 @@ pub async fn load_plugin(
         |s| s,
     )
     .context("link mqtt host")?;
-    crate::component::iot::plugin_host::registry::add_to_linker::<_, HasSelf<PluginState>>(
-        &mut linker,
-        |s| s,
-    )
-    .context("link registry host")?;
+    // ABI 1.3.0 (M5a W1) removed the `registry::upsert-device`
+    // capability — no `registry::add_to_linker` to call here. The
+    // PluginState `registry` channel field remains for future per-
+    // plugin admin RPCs.
 
     let state = PluginState {
         id: plugin_id.to_owned(),

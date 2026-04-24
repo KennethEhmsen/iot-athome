@@ -1,10 +1,20 @@
 //! Plugin SDK (Rust).
 //!
 //! Plugins compile to a WASM Component Model module targeting the
-//! `iot:plugin-host@1.1.0` WIT world ([schemas/wit/iot-plugin-host.wit]).
-//! 1.1.0 added the `mqtt` interface + `on-mqtt-message` runtime export
-//! (ADR-0013). Plugins that don't handle MQTT still need to implement
-//! `on_mqtt_message` — return `Ok(())` as a no-op.
+//! `iot:plugin-host@1.3.0` WIT world ([schemas/wit/iot-plugin-host.wit]).
+//!
+//! Notable per-version changes plugin authors care about:
+//!   * 1.1.0 added the `mqtt` interface + `on-mqtt-message` runtime
+//!     export (ADR-0013). Plugins that don't handle MQTT still need
+//!     to implement `on_mqtt_message` — return `Ok(())` as a no-op.
+//!   * 1.2.0 added the transitional `registry` interface (later
+//!     dropped — see below).
+//!   * 1.3.0 (M5a W1) **removed** the `registry` interface. The
+//!     iot-registry bus-watcher auto-registers any
+//!     `(integration, external_id)` pair seen on `device.>` publishes,
+//!     so adapters drop their `registry::upsert_device(...)` calls and
+//!     simply publish state. Plugins built against 1.2.0 won't load
+//!     under a 1.3.0+ host.
 //!
 //! Usage (from a plugin crate that depends on this SDK):
 //!

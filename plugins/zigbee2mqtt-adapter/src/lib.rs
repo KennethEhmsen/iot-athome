@@ -1,6 +1,6 @@
 //! zigbee2mqtt adapter — WASM plugin port of the M1 native adapter.
 //!
-//! Flow (per ADR-0013):
+//! Flow (per ADR-0013, post-M5a-W1):
 //!
 //!   1. `init()` → subscribe to `zigbee2mqtt/+` via the host MQTT
 //!      capability. The host owns the rumqttc connection + mTLS
@@ -9,13 +9,18 @@
 //!      `on_mqtt_message(topic, payload)` fires:
 //!        a. `translator::friendly_name_from_topic` pulls the
 //!           `zigbee2mqtt/<friendly>` out of the topic.
-//!        b. `registry::upsert_device(...)` registers the device in
-//!           the registry via the host's gRPC capability (returns the
-//!           canonical ULID — mints one first time, same ULID forever
-//!           after).
-//!        c. `state_publisher::publish_all` emits one
-//!           `EntityState` protobuf per recognised key on
-//!           `device.zigbee2mqtt.<id>.<entity>.state`.
+//!        b. `state_publisher::publish_all` emits one `EntityState`
+//!           protobuf per recognised key on
+//!           `device.zigbee2mqtt.<friendly>.<entity>.state`. The
+//!           iot-registry bus-watcher (M3 W1.2) sees the publish
+//!           and auto-registers the
+//!           `("zigbee2mqtt", <friendly>)` pair on first sight, so
+//!           no explicit registry call is needed (and as of ABI
+//!           1.3.0 / M5a W1, no host capability for it exists).
+//!
+//! The plugin uses `friendly_name` directly as the device id on
+//! the bus subject; the registry mints + remembers a canonical ULID
+//! internally, available via `iotctl device list`.
 //!
 //! Everything downstream (panel, automation) sees identical bytes to
 //! what the M1 native adapter produced — the Protobuf wire format is
@@ -28,7 +33,7 @@ mod state_publisher;
 mod translator;
 
 use iot_plugin_sdk_rust::exports::iot::plugin_host::runtime::{Guest, Payload, PluginError};
-use iot_plugin_sdk_rust::iot::plugin_host::{log, mqtt, registry};
+use iot_plugin_sdk_rust::iot::plugin_host::{log, mqtt};
 
 struct Component;
 
@@ -98,22 +103,21 @@ impl Guest for Component {
             return Ok(());
         }
 
-        // 3. Upsert the device. The registry is idempotent on
-        // `(integration, external_id)`, so repeat arrivals for the same
-        // friendly_name return the same ULID cheaply.
-        let device_ulid = registry::upsert_device(
-            "zigbee2mqtt",
-            friendly,
-            friendly, // label defaults to friendly-name (user can rename via panel)
-            "",       // manufacturer unknown from z2m payload alone
-            "",       // model ditto — z2m surfaces these in `/bridge/devices` which is M3
-        )?;
-
-        // 4. Publish one EntityState per recognised key. Each bus
+        // 3. Publish one EntityState per recognised key. Each bus
         // publish is capability-checked against
         // `capabilities.bus.publish` (manifest declares
-        // `device.zigbee2mqtt.>`).
-        state_publisher::publish_all(&device_ulid, friendly, &json);
+        // `device.zigbee2mqtt.>`). The iot-registry bus-watcher
+        // (M3 W1.2) auto-registers the `("zigbee2mqtt", friendly)`
+        // pair on first sight, so we no longer call
+        // `registry::upsert_device` here — the host capability was
+        // removed in ABI 1.3.0 (M5a W1).
+        //
+        // The bus subject embeds `friendly` directly as the device
+        // id segment; the registry mints + remembers the canonical
+        // ULID internally for `iotctl device list`. Older callers
+        // that pass a ULID into `state_publisher::publish_all`'s
+        // first slot still work — pass `friendly` as both id + name.
+        state_publisher::publish_all(friendly, friendly, &json);
         Ok(())
     }
 }

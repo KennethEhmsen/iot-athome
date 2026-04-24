@@ -1,22 +1,21 @@
 //! zigbee2mqtt payload → canonical-device translation.
 //!
-//! Pulled out of the old native adapter unchanged except for one thing:
-//! the new WASM shape doesn't build `iot-proto`'s `Device` type here
-//! (adapters call the host's `registry::upsert-device` capability
-//! instead, which takes plain strings). So this module shrinks to the
-//! two pure helpers the plugin actually needs:
+//! Pure data + pure functions — no protobuf, no tokio, no
+//! iot-proto. Unit-testable without any host bindings. The two
+//! helpers the plugin uses:
 //!
-//!   * [`friendly_name_from_topic`] — parse `zigbee2mqtt/<fn>[/sub]` and
-//!     recover `<fn>`.
+//!   * [`friendly_name_from_topic`] — parse `zigbee2mqtt/<fn>[/sub]`
+//!     and recover `<fn>`. The friendly name doubles as the device's
+//!     external_id; the iot-registry bus-watcher (M3 W1.2) registers
+//!     the `(zigbee2mqtt, <fn>)` pair on first publish, retiring the
+//!     M2-era explicit `registry::upsert-device` host call (gone in
+//!     ABI 1.3.0 / M5a W1).
 //!   * [`known_entity_keys`] — filter a JSON object's keys down to the
 //!     ones we publish an `EntityState` for (ignoring noisy internals
 //!     like `last_seen`, `update.state`, etc.).
-//!   * [`entity_catalog`] — per-key metadata the plugin would surface
-//!     to the registry. Used by `lib.rs` when it needs a label /
-//!     manufacturer / model to feed the upsert host call.
-//!
-//! This is pure data + pure functions — no protobuf, no tokio, no
-//! iot-proto. Unit-testable without any host bindings.
+//!   * [`entity_catalog`] — per-key metadata describing units / kind
+//!     for entities. The registry sees this through the EntityState
+//!     payloads, not via the host call path.
 
 /// One recognized zigbee2mqtt payload key and the canonical entity
 /// metadata we attach to it.

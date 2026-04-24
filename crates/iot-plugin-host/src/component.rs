@@ -1,4 +1,4 @@
-//! Host-side bindings for the `iot:plugin-host@1.1.0` WIT world.
+//! Host-side bindings for the `iot:plugin-host@1.3.0` WIT world.
 //!
 //! `wasmtime::component::bindgen!` generates:
 //!  * A `Plugin` type wrapping an instantiated component.
@@ -7,11 +7,15 @@
 //!  * `call_runtime_init` / `call_runtime_on_message` / `call_runtime_on_mqtt_message`
 //!    accessors.
 //!
-//! 1.1.0 adds the `mqtt` interface + `on-mqtt-message` export per
-//! [ADR-0013](../../../docs/adr/0013-zigbee2mqtt-wasm-migration.md). The
-//! actual broker connection + inbound-dispatch loop lives in a separate
-//! `mqtt` module (not yet in this commit — the host impl here is
-//! capability-check-only and returns "no broker wired" for publish).
+//! ABI evolution (see also `schemas/wit/iot-plugin-host.wit`):
+//!  * 1.1.0 — added the `mqtt` interface + `on-mqtt-message` export
+//!    per [ADR-0013](../../../docs/adr/0013-zigbee2mqtt-wasm-migration.md).
+//!  * 1.2.0 — added the transitional `registry::upsert-device` capability.
+//!  * 1.3.0 (M5a W1) — **removed** `registry::upsert-device`. The
+//!    iot-registry bus-watcher (M3 W1.2) auto-registers devices from
+//!    `device.>` publishes; adapters drop the explicit upsert call.
+//!    Plugins built against 1.2.0 won't load — wasmtime errors at
+//!    instantiation when their unresolved import isn't satisfied.
 
 #![allow(
     clippy::all,
@@ -54,10 +58,11 @@ pub struct PluginState {
     /// `None` when the host was built without MQTT support (most unit
     /// tests).
     pub mqtt: Option<Arc<crate::mqtt::MqttBroker>>,
-    /// Shared gRPC channel to the registry service. Plugins call it
-    /// via the `registry` host capability (ABI 1.2.0+). `None` in
-    /// offline / unit-test setups — the host impl returns a clear
-    /// `registry.not_configured` PluginError in that case.
+    /// Shared gRPC channel to the registry service. The 1.2.0
+    /// `registry::upsert-device` import that consumed it was removed
+    /// in 1.3.0; the field stays for the gRPC-stream metadata path
+    /// + future per-plugin admin RPCs. `None` in offline / unit-test
+    /// setups.
     pub registry: Option<tonic::transport::Channel>,
     /// This plugin's own mailbox, used when registering with
     /// `MqttRouter` so inbound messages route back to us. Filled in by
@@ -299,115 +304,16 @@ impl crate::component::iot::plugin_host::mqtt::Host for PluginState {
     }
 }
 
-// ---------- registry host impl (ABI 1.2.0+, transitional per ADR-0013) ----------
+// ---------- registry host impl: removed in ABI 1.3.0 (M5a W1) ----------
 //
-// Wraps the registry gRPC client so plugins never link tonic/hyper
-// (which don't target wasm32-wasip2). Capability-checked against
-// `capabilities.registry.upsert`. When the host was started without a
-// registry channel (unit tests, offline setups), returns a clear
-// `registry.not_configured` PluginError instead of silently dropping
-// the call — adapters that *need* registry have no useful fallback.
+// The `registry::upsert-device` host capability is gone. The
+// iot-registry bus-watcher shipped in M3 W1.2 auto-registers any
+// unknown `(integration, external_id)` pair on `device.>` publishes,
+// which makes the explicit upsert call redundant. M4 shipped a
+// one-shot deprecation warn log; M5a removes the import + handler.
 //
-// M4 status: deprecated in favour of iot-registry's bus watcher
-// (M3 W1.2) which auto-registers unknown `(integration, external_id)`
-// pairs from `device.*.>.state` publishes. Plugins calling this get
-// a one-shot `registry.deprecated` warn log per host lifetime. M5
-// removes the capability entirely.
-
-/// Once-per-host-lifetime gate for the registry-deprecation warning.
-/// Keeps log volume bounded when a chatty adapter calls the capability
-/// on every message.
-static REGISTRY_DEPRECATED_LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-
-impl crate::component::iot::plugin_host::registry::Host for PluginState {
-    #[tracing::instrument(
-        name = "host_call",
-        skip(self),
-        fields(
-            plugin = %self.id,
-            capability = "registry.upsert-device",
-            integration = %integration,
-            external_id = %external_id,
-        ),
-    )]
-    async fn upsert_device(
-        &mut self,
-        integration: String,
-        external_id: String,
-        label: String,
-        manufacturer: String,
-        model: String,
-    ) -> Result<String, PluginError> {
-        // M4 deprecation nudge — fires once per host lifetime to keep
-        // log volume bounded under chatty adapters.
-        if REGISTRY_DEPRECATED_LOGGED.set(()).is_ok() {
-            warn!(
-                plugin = %self.id,
-                "registry.upsert-device is deprecated; the registry now auto-registers \
-                 devices from bus events (M3 W1.2). Capability removed in M5 / ABI 1.3.0."
-            );
-        }
-        if let Err(d) = self.capabilities.check_registry_upsert() {
-            warn!(reason = d.code, "capability.denied");
-            record_denied(
-                self.audit.clone(),
-                self.id.clone(),
-                format!("registry.upsert-device({integration}/{external_id})"),
-                d.code.to_string(),
-            )
-            .await;
-            return Err(PluginError {
-                code: d.code.to_string(),
-                message: d.message,
-            });
-        }
-        let Some(channel) = self.registry.clone() else {
-            return Err(PluginError {
-                code: "registry.not_configured".into(),
-                message: "host has no registry channel — check Config::registry_url".into(),
-            });
-        };
-
-        use iot_proto::iot::device::v1::{Device, TrustLevel};
-        use iot_proto::iot::registry::v1::registry_service_client::RegistryServiceClient;
-        use iot_proto::iot::registry::v1::UpsertDeviceRequest;
-
-        let mut client = RegistryServiceClient::new(channel);
-        let device = Device {
-            id: None,
-            integration: integration.clone(),
-            external_id: external_id.clone(),
-            manufacturer,
-            model,
-            label,
-            rooms: Vec::new(),
-            capabilities: Vec::new(),
-            entities: Vec::new(),
-            trust_level: TrustLevel::UserAdded.into(),
-            schema_version: iot_core::DEVICE_SCHEMA_VERSION,
-            plugin_meta: std::collections::HashMap::default(),
-            last_seen: None,
-        };
-        let resp = client
-            .upsert_device(UpsertDeviceRequest {
-                device: Some(device),
-                idempotency_key: String::new(),
-            })
-            .await
-            .map_err(|e| PluginError {
-                code: "registry.upsert_failed".into(),
-                message: format!("{e:#}"),
-            })?
-            .into_inner();
-        let ulid = resp
-            .device
-            .and_then(|d| d.id)
-            .map(|u| u.value)
-            .ok_or_else(|| PluginError {
-                code: "registry.upsert_failed".into(),
-                message: "registry returned no device / id".into(),
-            })?;
-        debug!(ulid = %ulid, created = resp.created, "registry.upsert-device ok");
-        Ok(ulid)
-    }
-}
+// Adapter plugins that previously called registry::upsert simply
+// drop the import — publishing on `device.<id>.state` is enough to
+// register the device. The host's per-plugin `registry` channel
+// field stays in PluginState (kept for the gRPC-stream metadata path
+// + future per-plugin admin RPCs); only the WASM import is gone.

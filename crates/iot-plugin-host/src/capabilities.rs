@@ -22,9 +22,11 @@ pub struct CapabilityMap {
     pub mqtt: MqttCapabilities,
     #[serde(default)]
     pub net: NetCapabilities,
-    /// Registry host capability (ABI 1.2.0+, transitional — see
-    /// ADR-0013). Plugins that need to register devices with the
-    /// registry (every MQTT→canonical adapter) declare this.
+    /// Registry capability — kept on the deserializer for manifest
+    /// backward compatibility, but the host no longer offers a
+    /// matching WIT import. ABI 1.3.0 (M5a W1) removed
+    /// `registry::upsert-device`; the iot-registry bus-watcher
+    /// auto-registers devices from `device.>` publishes instead.
     #[serde(default)]
     pub registry: RegistryCapabilities,
 }
@@ -53,11 +55,11 @@ pub struct NetCapabilities {
     pub outbound: Vec<String>,
 }
 
-/// Registry access — gRPC upsert / list.
+/// Registry access — historically gated `registry::upsert-device`.
 ///
-/// Boolean because there's only one registry per host process;
-/// topic-style fine-grained ACL isn't meaningful here. M3 replaces
-/// this with bus-driven auto-register and this capability goes away.
+/// Gone in ABI 1.3.0; `list` was never implemented. Kept around
+/// only so old manifests parse without error; the field has no
+/// runtime effect. New manifests should omit it.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct RegistryCapabilities {
     #[serde(default)]
@@ -109,21 +111,6 @@ impl CapabilityMap {
             code: "capability.denied",
             message: format!("mqtt.publish on `{topic}` not in manifest allow-list"),
         })
-    }
-
-    /// Check that the plugin is allowed to call `registry.upsert-device`.
-    ///
-    /// # Errors
-    /// Returns [`Denied`] if the manifest didn't opt in.
-    pub fn check_registry_upsert(&self) -> Result<(), Denied> {
-        if self.registry.upsert {
-            Ok(())
-        } else {
-            Err(Denied {
-                code: "capability.denied",
-                message: "registry.upsert-device not enabled in manifest".into(),
-            })
-        }
     }
 
     /// Check an MQTT topic filter against the `mqtt.subscribe` allow-list.
@@ -320,26 +307,6 @@ mod tests {
         assert!(m.check_mqtt_subscribe("sensors/#").is_err());
         // Plugin tries a completely different root: DENIED.
         assert!(m.check_mqtt_subscribe("actuators/+/state").is_err());
-    }
-
-    // --------------------------------------------------- registry capability
-
-    #[test]
-    fn registry_upsert_denied_by_default() {
-        let m = CapabilityMap::default();
-        assert!(m.check_registry_upsert().is_err());
-    }
-
-    #[test]
-    fn registry_upsert_allowed_when_manifest_opts_in() {
-        let m = CapabilityMap {
-            registry: RegistryCapabilities {
-                upsert: true,
-                list: false,
-            },
-            ..Default::default()
-        };
-        assert!(m.check_registry_upsert().is_ok());
     }
 
     // --------------------------------------------------- mqtt subscribe tests

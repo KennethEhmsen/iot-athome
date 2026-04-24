@@ -1,16 +1,20 @@
 # IoT-AtHome zigbee2mqtt adapter (WASM port of the M1 native adapter).
 #
-# Consumes every zigbee2mqtt/<friendly_name> MQTT message, upserts the
-# implied device in the registry, and publishes one EntityState per
-# recognized entity on `device.zigbee2mqtt.<id>.<entity>.state`.
+# Consumes every zigbee2mqtt/<friendly_name> MQTT message, translates,
+# and publishes one EntityState per recognized entity on
+# `device.zigbee2mqtt.<friendly_name>.<entity>.state`. The iot-registry
+# bus-watcher (M3 W1.2) auto-registers the
+# `(zigbee2mqtt, friendly_name)` pair on first sight — no explicit
+# registry upsert needed (the host capability went away in ABI 1.3.0
+# / M5a W1).
 #
-# Supersedes ADR-0011's "single-NATS-account" arrangement once this
-# loads — the plugin gets its own nkey seed at install time (M2 W3).
+# Per-plugin NATS user JWT minted by `iotctl plugin install` against
+# the operator-signed account — ADR-0011 retired in M5a W1.
 
 schema_version: 1
 id: zigbee2mqtt-adapter
 name: Zigbee2MQTT Adapter
-version: 0.2.0
+version: 0.3.0
 description: >
   Bridges zigbee2mqtt MQTT traffic into canonical EntityState bus events.
   Requires zigbee2mqtt running as a separate Node process publishing on
@@ -22,7 +26,7 @@ license: "Apache-2.0 OR MIT"
 runtime: wasm-component
 abi:
   world: iot:plugin-host
-  version: 1.2.0
+  version: 1.3.0
 entrypoint: plugin.wasm
 
 capabilities:
@@ -32,9 +36,6 @@ capabilities:
   bus:
     publish:
       - "device.zigbee2mqtt.>"
-  registry:
-    upsert: true
-    list: true
 
 resources:
   memory_mb_max: 64
