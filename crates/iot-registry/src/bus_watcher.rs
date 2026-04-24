@@ -27,6 +27,7 @@
 
 use anyhow::{Context as _, Result};
 use iot_bus::Bus;
+use iot_history::HistoryStore;
 use iot_proto::iot::device::v1::{Device, TrustLevel};
 use tracing::{debug, info, warn};
 
@@ -44,17 +45,37 @@ enum MatchOutcome {
     Touched,
 }
 
-/// Background watcher task. Owns a bus subscription + a repo handle.
+/// Background watcher task. Owns a bus subscription + a repo handle,
+/// plus an optional history backend that mirrors every recognised
+/// publish into long-term storage when configured.
 #[derive(Debug, Clone)]
 pub struct BusWatcher {
     bus: Bus,
     repo: DeviceRepo,
+    /// Optional TimescaleDB-backed history store (M5a W4.1). `None`
+    /// when `IOT_TIMESCALE_URL` is unset; the registry then runs in
+    /// its M3-era SQLite-only "current state only" mode.
+    history: Option<HistoryStore>,
 }
 
 impl BusWatcher {
     #[must_use]
     pub fn new(bus: Bus, repo: DeviceRepo) -> Self {
-        Self { bus, repo }
+        Self {
+            bus,
+            repo,
+            history: None,
+        }
+    }
+
+    /// Attach a long-term history backend. Builder-style so the
+    /// existing call sites that don't enable history (every test +
+    /// the dev loop without `IOT_TIMESCALE_URL`) keep their
+    /// `BusWatcher::new(bus, repo)` line unchanged.
+    #[must_use]
+    pub fn with_history(mut self, history: HistoryStore) -> Self {
+        self.history = Some(history);
+        self
     }
 
     /// Subscribe to `device.>` and loop forever dispatching each
@@ -83,9 +104,25 @@ impl BusWatcher {
                 |p| p.child_of(),
             );
             let subject = msg.subject.to_string();
+            let payload = msg.payload.to_vec();
             iot_observability::traceparent::with_context(ctx, async {
                 if let Err(e) = self.handle(&subject).await {
                     warn!(subject, error = %format!("{e:#}"), "bus watcher handle failed");
+                }
+                // History write — non-fatal: a Postgres hiccup must
+                // not stop the watcher loop. The registry's current-
+                // state path is the "must succeed" half; long-term
+                // history is "best effort, eventually consistent".
+                if let Some(history) = self.history.as_ref() {
+                    if let Some(device_id) = device_token_for_history(&subject) {
+                        if let Err(e) = history.record(device_id, &subject, &payload).await {
+                            warn!(
+                                subject,
+                                error = %format!("{e:#}"),
+                                "history record failed (continuing)"
+                            );
+                        }
+                    }
                 }
             })
             .await;
@@ -174,6 +211,14 @@ fn parse_device_subject(subject: &str) -> Option<(&str, &str)> {
     }
 }
 
+/// Extract the `<device>` token from a recognised subject for use as
+/// a history-row's `device_id`. Returns `None` for subjects we don't
+/// route to the registry — the history path mirrors the registry's
+/// own filter, never landing rows for non-device subjects.
+fn device_token_for_history(subject: &str) -> Option<&str> {
+    parse_device_subject(subject).map(|(_, device)| device)
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
@@ -214,5 +259,26 @@ mod tests {
         assert_eq!(parse_device_subject(""), None);
         // device.<plugin>.<device>.<entity>.<unknown_suffix>
         assert_eq!(parse_device_subject("device.zigbee2mqtt.foo.bar.baz"), None);
+    }
+
+    #[test]
+    fn history_token_extraction_mirrors_subject_filter() {
+        // The history-row device_id is the same `<device>` token the
+        // registry routes on. Anything ignored by the registry filter
+        // also yields no history row.
+        assert_eq!(
+            device_token_for_history("device.zigbee2mqtt.kitchen-temp.temperature.state"),
+            Some("kitchen-temp")
+        );
+        assert_eq!(
+            device_token_for_history("device.sdr433.acurite-tower-13245-a.temperature_C.state"),
+            Some("acurite-tower-13245-a")
+        );
+        assert_eq!(
+            device_token_for_history("device.zigbee2mqtt.kitchen-temp.avail"),
+            Some("kitchen-temp")
+        );
+        assert_eq!(device_token_for_history("cmd.zigbee2mqtt.foo.bar"), None);
+        assert_eq!(device_token_for_history("device.zigbee2mqtt"), None);
     }
 }

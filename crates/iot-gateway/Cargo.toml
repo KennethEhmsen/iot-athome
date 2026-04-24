@@ -24,6 +24,10 @@ iot-proto = { path = "../iot-proto" }
 iot-bus = { path = "../iot-bus" }
 iot-config = { path = "../iot-config" }
 iot-observability = { path = "../iot-observability" }
+# M5a W4.1: read-side of the optional long-term history backend.
+# Same env-driven opt-in as the registry's write-side; absent env →
+# `/devices/{id}/history` returns 503 with code `history.disabled`.
+iot-history = { path = "../iot-history" }
 
 anyhow.workspace = true
 async-nats.workspace = true

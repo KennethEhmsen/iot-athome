@@ -121,7 +121,35 @@ pub async fn run(cfg: Config) -> Result<()> {
     // (see ADR-0013 §Consequences). Skipped if the host was started
     // without a bus; gRPC-only test setups stay clean.
     if let Some(bus_for_watcher) = bus {
-        let watcher = bus_watcher::BusWatcher::new(bus_for_watcher, repo);
+        // Optional long-term history backend (M5a W4.1). When
+        // IOT_TIMESCALE_URL is set the watcher mirrors every
+        // recognised publish into the hypertable; absent env keeps
+        // the M3-era SQLite-only path.
+        let history = match iot_history::from_env().await {
+            Ok(Some(h)) => {
+                info!("history backend connected (TimescaleDB)");
+                Some(h)
+            }
+            Ok(None) => {
+                info!("no IOT_TIMESCALE_URL — long-term history disabled");
+                None
+            }
+            Err(e) => {
+                // Hard-fail at startup: the operator opted into a
+                // history URL and we can't honour it. Better to
+                // refuse to boot than silently lose history.
+                tracing::error!(
+                    error = %format!("{e:#}"),
+                    "IOT_TIMESCALE_URL set but history backend failed to connect"
+                );
+                return Err(anyhow::anyhow!("history backend init failed: {e}"));
+            }
+        };
+
+        let mut watcher = bus_watcher::BusWatcher::new(bus_for_watcher, repo);
+        if let Some(h) = history {
+            watcher = watcher.with_history(h);
+        }
         tokio::spawn(async move {
             if let Err(e) = watcher.run().await {
                 tracing::error!(

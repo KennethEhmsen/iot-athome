@@ -2198,6 +2198,7 @@ dependencies = [
  "iot-bus",
  "iot-config",
  "iot-core",
+ "iot-history",
  "iot-observability",
  "iot-proto",
  "jsonwebtoken",
@@ -2212,6 +2213,19 @@ dependencies = [
  "tonic",
  "tower 0.5.3",
  "tower-http",
+ "tracing",
+]
+
+[[package]]
+name = "iot-history"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 
@@ -2300,6 +2314,7 @@ dependencies = [
  "iot-bus",
  "iot-config",
  "iot-core",
+ "iot-history",
  "iot-observability",
  "iot-proto",
  "prost",

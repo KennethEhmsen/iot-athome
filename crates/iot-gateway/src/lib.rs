@@ -111,10 +111,34 @@ pub async fn run(cfg: Config) -> Result<()> {
         Verifier::new(o)
     });
 
+    // M5a W4.1: optional long-term history. Reads IOT_TIMESCALE_URL
+    // exactly the same way the registry's bus_watcher does, so an
+    // operator either gets history end-to-end (write side from the
+    // registry, read side from this gateway endpoint) or not at all.
+    let history = match iot_history::from_env().await {
+        Ok(Some(h)) => {
+            info!("history backend connected (read path)");
+            Some(h)
+        }
+        Ok(None) => {
+            info!("no IOT_TIMESCALE_URL — /devices/{{id}}/history will 503");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %format!("{e:#}"),
+                "IOT_TIMESCALE_URL set but read-side history connect failed — \
+                 the endpoint will 502 until the backend is reachable"
+            );
+            None
+        }
+    };
+
     let state = state::AppState {
         registry_client,
         bus,
         verifier,
+        history,
     };
 
     // REST routes under /api/v1 are gated by Bearer header. Middleware is
@@ -128,6 +152,13 @@ pub async fn run(cfg: Config) -> Result<()> {
         .route(
             "/api/v1/devices/{id}",
             get(handlers::get_device).delete(handlers::delete_device),
+        )
+        // M5a W4.1: optional long-term history. Returns 503 with
+        // code `history.disabled` when the host wasn't started with
+        // IOT_TIMESCALE_URL (no surprise empty 200s).
+        .route(
+            "/api/v1/devices/{id}/history",
+            get(handlers::get_device_history),
         )
         .layer(middleware::from_fn_with_state(
             state.clone(),

@@ -26,6 +26,7 @@ volumes:
   tempo-data:
   prom-data:
   grafana-data:
+  timescale-data:
 
 services:
 
@@ -169,3 +170,34 @@ services:
       - grafana-data:/var/lib/grafana
     networks: [iot]
     depends_on: [tempo, loki, prometheus]
+
+  # --- TimescaleDB (long-term entity-state history, M5a W4.1) ---
+  #
+  # Opt-in via the `history` profile so the default `just dev` keeps
+  # the SQLite-only fast loop:
+  #
+  #   docker compose -f deploy/compose/dev-stack.yml --profile history up -d
+  #
+  # Then point the registry + gateway at it:
+  #
+  #   export IOT_TIMESCALE_URL=postgres://iot:iot@127.0.0.1:5432/iot_history
+  #
+  # The host-side `iot-history` crate creates the schema +
+  # hypertable on first connect (idempotent).
+  timescale:
+    image: timescale/timescaledb:2.17.2-pg16
+    container_name: iot-timescale
+    restart: unless-stopped
+    profiles: ["history"]
+    environment:
+      POSTGRES_USER: iot
+      POSTGRES_PASSWORD: iot     # DEV ONLY; prod uses managed Postgres + secret
+      POSTGRES_DB: iot_history
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+    networks:
+      iot:
+        aliases:
+          - timescale.iot.local

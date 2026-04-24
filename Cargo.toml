@@ -14,6 +14,10 @@ members = [
   "crates/iot-observability",
   "crates/iot-config",
   "crates/iot-cli",
+  # M5a W4.1: optional TimescaleDB-backed long-term history store.
+  # Always compiles (sqlx-postgres is already in the workspace dep
+  # graph); enabled at runtime via IOT_TIMESCALE_URL env.
+  "crates/iot-history",
 ]
 exclude = [
   "firmware/*",

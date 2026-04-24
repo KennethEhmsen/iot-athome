@@ -56,6 +56,12 @@ pub struct AppState {
     pub bus: Option<Bus>,
     /// OIDC bearer verifier. `None` = dev mode (auth disabled).
     pub verifier: Option<Verifier>,
+    /// Optional long-term history backend (M5a W4.1). When set, the
+    /// `GET /api/v1/devices/{id}/history` endpoint serves rows from
+    /// the TimescaleDB hypertable; when `None` the endpoint
+    /// short-circuits to a 503 explaining the backend isn't
+    /// configured.
+    pub history: Option<iot_history::HistoryStore>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -63,6 +69,7 @@ impl std::fmt::Debug for AppState {
         f.debug_struct("AppState")
             .field("bus", &self.bus.is_some())
             .field("verifier", &self.verifier.is_some())
+            .field("history", &self.history.is_some())
             .field("registry_client", &"<tonic client>")
             .finish()
     }

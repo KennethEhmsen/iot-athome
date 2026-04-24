@@ -25,6 +25,10 @@ iot-bus = { path = "../iot-bus" }
 iot-audit = { path = "../iot-audit" }
 iot-config = { path = "../iot-config" }
 iot-observability = { path = "../iot-observability" }
+# M5a W4.1: optional long-term history — enabled at runtime when
+# IOT_TIMESCALE_URL is set. The bus_watcher writes a row per
+# `device.>` publish; no overhead when the env is absent.
+iot-history = { path = "../iot-history" }
 
 anyhow.workspace = true
 async-trait.workspace = true

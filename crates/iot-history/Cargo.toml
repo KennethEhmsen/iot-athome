@@ -1,0 +1,27 @@
+[package]
+name = "iot-history"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "IoT-AtHome — long-term entity-state history backend (TimescaleDB hypertable, opt-in)."
+
+[lints]
+workspace = true
+
+[dependencies]
+# sqlx-postgres for the hypertable. The workspace `sqlx` dep already
+# pulls postgres + sqlite features, so this crate doesn't add a new
+# linker dep — just a new code path.
+sqlx.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
