@@ -26,6 +26,22 @@ use tracing::{error, info, instrument};
 
 use crate::repo::{DeviceRepo, RepoError};
 
+/// Pull a `TraceContext` out of the inbound gRPC request's metadata,
+/// taking `child_of(...)` on a parsed upstream, or minting a fresh
+/// root when nothing's there. Symmetric to the gateway's inbound
+/// HTTP middleware + the bus subscriber helper.
+fn extract_ctx(
+    meta: &tonic::metadata::MetadataMap,
+) -> iot_observability::traceparent::TraceContext {
+    meta.get("traceparent")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| iot_observability::traceparent::TraceContext::parse(s).ok())
+        .map_or_else(
+            iot_observability::traceparent::TraceContext::new_root,
+            |p| p.child_of(),
+        )
+}
+
 #[derive(Debug)]
 pub struct RegistrySvc {
     repo: DeviceRepo,
@@ -80,40 +96,44 @@ impl RegistryService for RegistrySvc {
         &self,
         request: Request<UpsertDeviceRequest>,
     ) -> Result<Response<UpsertDeviceResponse>, Status> {
-        let req = request.into_inner();
-        let device = req
-            .device
-            .ok_or_else(|| Status::invalid_argument("device is required"))?;
-        let created_before = device.id.as_ref().is_none_or(|u| u.value.is_empty());
+        let ctx = extract_ctx(request.metadata());
+        iot_observability::traceparent::with_context(ctx, async move {
+            let req = request.into_inner();
+            let device = req
+                .device
+                .ok_or_else(|| Status::invalid_argument("device is required"))?;
+            let created_before = device.id.as_ref().is_none_or(|u| u.value.is_empty());
 
-        let stored = self.repo.upsert(device).await.map_err(map_repo_err)?;
+            let stored = self.repo.upsert(device).await.map_err(map_repo_err)?;
 
-        let id = stored
-            .id
-            .as_ref()
-            .map(|u| u.value.clone())
-            .unwrap_or_default();
-        self.audit_write(
-            if created_before {
-                "device.created"
-            } else {
-                "device.updated"
-            },
-            serde_json::json!({
-                "id": id,
-                "integration": stored.integration,
-                "external_id": stored.external_id,
-            }),
-        )
-        .await;
+            let id = stored
+                .id
+                .as_ref()
+                .map(|u| u.value.clone())
+                .unwrap_or_default();
+            self.audit_write(
+                if created_before {
+                    "device.created"
+                } else {
+                    "device.updated"
+                },
+                serde_json::json!({
+                    "id": id,
+                    "integration": stored.integration,
+                    "external_id": stored.external_id,
+                }),
+            )
+            .await;
 
-        self.bus_publish_state(&stored).await;
+            self.bus_publish_state(&stored).await;
 
-        info!(device.id = %id, "upsert_device ok");
-        Ok(Response::new(UpsertDeviceResponse {
-            device: Some(stored),
-            created: created_before,
-        }))
+            info!(device.id = %id, "upsert_device ok");
+            Ok(Response::new(UpsertDeviceResponse {
+                device: Some(stored),
+                created: created_before,
+            }))
+        })
+        .await
     }
 
     #[instrument(skip(self, request))]
@@ -121,13 +141,17 @@ impl RegistryService for RegistrySvc {
         &self,
         request: Request<GetDeviceRequest>,
     ) -> Result<Response<GetDeviceResponse>, Status> {
-        let id = request
-            .into_inner()
-            .id
-            .ok_or_else(|| Status::invalid_argument("id is required"))?
-            .value;
-        let d = self.repo.get(&id).await.map_err(map_repo_err)?;
-        Ok(Response::new(GetDeviceResponse { device: Some(d) }))
+        let ctx = extract_ctx(request.metadata());
+        iot_observability::traceparent::with_context(ctx, async move {
+            let id = request
+                .into_inner()
+                .id
+                .ok_or_else(|| Status::invalid_argument("id is required"))?
+                .value;
+            let d = self.repo.get(&id).await.map_err(map_repo_err)?;
+            Ok(Response::new(GetDeviceResponse { device: Some(d) }))
+        })
+        .await
     }
 
     #[instrument(skip(self, request))]
@@ -135,38 +159,46 @@ impl RegistryService for RegistrySvc {
         &self,
         request: Request<ListDevicesRequest>,
     ) -> Result<Response<Self::ListDevicesStream>, Status> {
-        let req = request.into_inner();
-        let integ = if req.integration.is_empty() {
-            None
-        } else {
-            Some(req.integration)
-        };
-        let room = if req.room.is_empty() {
-            None
-        } else {
-            Some(req.room)
-        };
-        let devices = self
-            .repo
-            .list(integ.as_deref(), room.as_deref())
-            .await
-            .map_err(map_repo_err)?;
+        let ctx = extract_ctx(request.metadata());
+        iot_observability::traceparent::with_context(ctx, async move {
+            let req = request.into_inner();
+            let integ = if req.integration.is_empty() {
+                None
+            } else {
+                Some(req.integration)
+            };
+            let room = if req.room.is_empty() {
+                None
+            } else {
+                Some(req.room)
+            };
+            let devices = self
+                .repo
+                .list(integ.as_deref(), room.as_deref())
+                .await
+                .map_err(map_repo_err)?;
 
-        let (tx, rx) = mpsc::channel::<Result<ListDevicesResponse, Status>>(16);
-        tokio::spawn(async move {
-            for d in devices {
-                if tx
-                    .send(Ok(ListDevicesResponse { device: Some(d) }))
-                    .await
-                    .is_err()
-                {
-                    break;
+            let (tx, rx) = mpsc::channel::<Result<ListDevicesResponse, Status>>(16);
+            // The spawned pump outlives the with_context scope, so
+            // each send doesn't inherit the trace id. For M4 that's
+            // a deliberate simplification — streaming listings are
+            // bulk reads, not a cross-service-trace concern.
+            tokio::spawn(async move {
+                for d in devices {
+                    if tx
+                        .send(Ok(ListDevicesResponse { device: Some(d) }))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
-            }
-        });
+            });
 
-        let stream = ReceiverStream::new(rx);
-        Ok(Response::new(Box::pin(stream) as Self::ListDevicesStream))
+            let stream = ReceiverStream::new(rx);
+            Ok(Response::new(Box::pin(stream) as Self::ListDevicesStream))
+        })
+        .await
     }
 
     #[instrument(skip(self, request))]
@@ -174,17 +206,21 @@ impl RegistryService for RegistrySvc {
         &self,
         request: Request<DeleteDeviceRequest>,
     ) -> Result<Response<DeleteDeviceResponse>, Status> {
-        let id = request
-            .into_inner()
-            .id
-            .ok_or_else(|| Status::invalid_argument("id is required"))?
-            .value;
-        let deleted = self.repo.delete(&id).await.map_err(map_repo_err)?;
-        if deleted {
-            self.audit_write("device.deleted", serde_json::json!({ "id": id }))
-                .await;
-        }
-        Ok(Response::new(DeleteDeviceResponse { deleted }))
+        let ctx = extract_ctx(request.metadata());
+        iot_observability::traceparent::with_context(ctx, async move {
+            let id = request
+                .into_inner()
+                .id
+                .ok_or_else(|| Status::invalid_argument("id is required"))?
+                .value;
+            let deleted = self.repo.delete(&id).await.map_err(map_repo_err)?;
+            if deleted {
+                self.audit_write("device.deleted", serde_json::json!({ "id": id }))
+                    .await;
+            }
+            Ok(Response::new(DeleteDeviceResponse { deleted }))
+        })
+        .await
     }
 }
 

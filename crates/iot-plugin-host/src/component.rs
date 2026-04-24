@@ -307,6 +307,17 @@ impl crate::component::iot::plugin_host::mqtt::Host for PluginState {
 // registry channel (unit tests, offline setups), returns a clear
 // `registry.not_configured` PluginError instead of silently dropping
 // the call — adapters that *need* registry have no useful fallback.
+//
+// M4 status: deprecated in favour of iot-registry's bus watcher
+// (M3 W1.2) which auto-registers unknown `(integration, external_id)`
+// pairs from `device.*.>.state` publishes. Plugins calling this get
+// a one-shot `registry.deprecated` warn log per host lifetime. M5
+// removes the capability entirely.
+
+/// Once-per-host-lifetime gate for the registry-deprecation warning.
+/// Keeps log volume bounded when a chatty adapter calls the capability
+/// on every message.
+static REGISTRY_DEPRECATED_LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 impl crate::component::iot::plugin_host::registry::Host for PluginState {
     #[tracing::instrument(
@@ -327,6 +338,15 @@ impl crate::component::iot::plugin_host::registry::Host for PluginState {
         manufacturer: String,
         model: String,
     ) -> Result<String, PluginError> {
+        // M4 deprecation nudge — fires once per host lifetime to keep
+        // log volume bounded under chatty adapters.
+        if REGISTRY_DEPRECATED_LOGGED.set(()).is_ok() {
+            warn!(
+                plugin = %self.id,
+                "registry.upsert-device is deprecated; the registry now auto-registers \
+                 devices from bus events (M3 W1.2). Capability removed in M5 / ABI 1.3.0."
+            );
+        }
         if let Err(d) = self.capabilities.check_registry_upsert() {
             warn!(reason = d.code, "capability.denied");
             record_denied(
