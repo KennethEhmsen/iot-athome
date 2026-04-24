@@ -70,6 +70,13 @@ ignore = [
   # RUSTSEC-2026-0104 — reachable panic in BorrowedCertRevocationList::from_der.
   # Same root cause; CRL parsing isn't on the rumqttc → broker code path.
   "RUSTSEC-2026-0104",
+  # paste 1.0.15 unmaintained — author archived the repo. Transitive via
+  # cel-interpreter 0.10 → antlr4rust 0.3.0-rc2 → better_any → paste, used
+  # for proc-macro identifier joining at compile time only (no runtime
+  # surface). A drop-in fork (`pastey`) exists but the upstream cel-rust /
+  # antlr4rust chain hasn't migrated. Revisit: on next cel-interpreter
+  # bump or when antlr4rust ships a non-rc release.
+  "RUSTSEC-2024-0436",
 ]
 yanked = "deny"
 
