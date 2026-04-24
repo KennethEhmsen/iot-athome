@@ -9,6 +9,12 @@
 # "Activ" looks like a misspelling of "Active" to typos. Used in the
 # rtl_433 SDR adapter's translator (M5a W3.4) device-shape examples.
 ActivLink = "ActivLink"
+# Bare "Activ" is the same prefix discussed verbatim in the M5a
+# retrospective when narrating how W3.4's preflight flagged it.
+# extend-identifiers matches whole tokens, so quoting it (in
+# backticks or prose) still trips the bare-word match unless it's
+# allowed standalone.
+Activ = "Activ"
 
 [default.extend-words]
 # Eclipse Mosquitto — MQTT broker product name. typos' default

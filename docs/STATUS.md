@@ -212,7 +212,7 @@ Panel reload → gateway WS handler subscribes →
 | `registry::upsert-device` removed | ✅ | **M5a W1.8** ABI 1.3.0 |
 | Real CEL interpreter | ✅ | **NEW M5a** — cel-interpreter 0.10 |
 | Wildcard JetStream replay | ✅ | **NEW M5a** |
-| Per-call fuel refuel | ✅ | **NEW M5a** — 10M default, manifest-overrideable |
+| Per-call fuel refuel | ✅ | **NEW M5a** — 10M default, manifest-overridable |
 | MQTT sub-refcount + exit-unsub | ✅ | **NEW M5a** |
 | Manifest-driven Mosquitto ACL | ✅ | **NEW M5a** — `iotctl mosquitto regen-acl` |
 | TimescaleDB long-term history | ✅ | **NEW M5a** — opt-in via `IOT_TIMESCALE_URL` |
