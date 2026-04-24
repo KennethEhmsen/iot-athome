@@ -136,5 +136,44 @@ mint_component zigbee-adapter "zigbee-adapter"      DNS:zigbee-adapter      DNS:
 # Client cert used by `iotctl` and by the panel's device identity during dev.
 mint_component client         "dev-client"          DNS:dev-client          DNS:localhost
 
+# ---------- NATS decentralized-auth trust root ----------
+#
+# Mints the operator + account keypair pair the broker reads via its
+# `operator:` directive + memory-resolver `resolver_preload` map. Per-
+# plugin user JWTs are minted later, by `iotctl plugin install`, against
+# the account seed produced here.
+#
+# Idempotent: skips if the operator / account files exist; pass
+# `--force-nats` to regenerate (DESTRUCTIVE — invalidates every user
+# JWT minted under the previous account key).
+
+NATS_TRUST_DIR="${OUT}/nats"
+mkdir -p "${NATS_TRUST_DIR}"
+
+if [[ ! -f "${NATS_TRUST_DIR}/iot-account.jwt" || "${1:-}" == "--force-nats" ]]; then
+  log "Bootstrapping NATS operator + account trust root"
+
+  # Build iotctl on demand if it isn't already on PATH. The release
+  # build stays cached across invocations so this is a one-time cost.
+  IOTCTL="${IOTCTL:-iotctl}"
+  if ! command -v "${IOTCTL}" >/dev/null 2>&1; then
+    log "  iotctl not on PATH — falling back to 'cargo run -p iot-cli --bin iotctl --quiet'"
+    IOTCTL="cargo run -p iot-cli --bin iotctl --quiet --"
+  fi
+
+  FORCE_FLAG=""
+  if [[ "${1:-}" == "--force-nats" ]]; then
+    FORCE_FLAG="--force"
+  fi
+
+  ${IOTCTL} nats bootstrap --out "${NATS_TRUST_DIR}" ${FORCE_FLAG} \
+    --account-name IOT
+else
+  log "  NATS trust root already exists at ${NATS_TRUST_DIR}/iot-account.jwt"
+fi
+
 log "Done. Certs in ${OUT}/"
 log "Add '${OUT}/ca/ca.crt' to your OS trust store for a friction-free dev loop."
+log "NATS account seed: ${NATS_TRUST_DIR}/iot-account.nk"
+log "  → export IOT_NATS_ACCOUNT_SEED=${NATS_TRUST_DIR}/iot-account.nk"
+log "    before 'iotctl plugin install' to mint per-plugin user JWTs."

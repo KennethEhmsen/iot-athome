@@ -1,9 +1,9 @@
 # ADR-0011: Dev-Mode Bus Auth — mTLS-only, Single IOT Account
 
-- **Status:** Accepted
-- **Date:** 2026-04-21
+- **Status:** Superseded by [M5a W1] — broker decentralized auth shipped 2026-04-24
+- **Date:** 2026-04-21 (accepted) · 2026-04-24 (superseded)
 - **Deciders:** IoT-AtHome core team
-- **Context milestone:** shipped in M1; replaced during M2 plugin installer work
+- **Context milestone:** shipped in M1; cryptographic minter shipped M3 W1.3; bootstrap wiring shipped M5a W1
 
 ## Context
 
@@ -51,3 +51,21 @@ Every service (`iot-registry`, `iot-gateway`, `zigbee2mqtt-adapter`) connects wi
 ## Supersession trigger
 
 This ADR is retired (status → Superseded) when ADR-0004's per-plugin account plan is implemented in the plugin installer — target M2 end.
+
+## Superseded
+
+The retirement landed in **M5a W1** (post-`v0.4.0-m4`), later than the originally-planned M2-end target. Two halves shipped in sequence:
+
+1. **Cryptographic half** (M3 W1.3) — `iot_bus::jwt::issue_user_jwt` minter + `UserAcl` + claim types, with unit-test coverage proving NATS-wire JWTs verify under the issuing account key. This was usable as a library but not yet wired into install or runtime.
+
+2. **Bootstrap wiring half** (M5a W1) — what made it actually retire ADR-0011:
+   - `iot_bus::jwt` extended with `issue_account_jwt` + `format_creds_file` so the operator → account → user trust chain mints end-to-end.
+   - `iotctl nats bootstrap` generates an operator + account keypair pair, signs an account JWT, and writes a `resolver.conf` snippet ready for the broker to `include`.
+   - `tools/devcerts/mint.sh` invokes `iotctl nats bootstrap` so `just dev`'s cert-mint pass also produces the JWT trust root.
+   - `iotctl plugin install`'s post-install hook reads the freshly-written `nats.nkey` + `acl.json`, mints a user JWT against the account seed (when `IOT_NATS_ACCOUNT_SEED` is set), and writes `nats.creds` next to them.
+   - `deploy/compose/nats/nats.conf` switched from `accounts { ... } no_auth_user: dev` to `include "certs/resolver.conf"` — the operator pubkey + memory-resolved account JWT are loaded from the generated snippet. No more shared `dev` user.
+   - `iot_bus::Config` gained a `creds_path` option (driven by `IOT_NATS_CREDS` env var); `Bus::connect` calls `async_nats::ConnectOptions::credentials_file` when set, falling back to mTLS-only when unset.
+
+The post-supersession dev path is therefore: `mint.sh` produces both mTLS bundle + JWT trust root → `just dev` boots the compose stack with the broker in operator-JWT mode → `iotctl plugin install` mints a per-plugin user JWT for each plugin → the runtime connects with mTLS + JWT.
+
+The two-step retirement (crypto then wiring) is reflected in the M5 plan's M5a/M5b split — a pattern the M4 retro flagged (don't ship "scaffolds claiming to be plugins") and one we deliberately repeated for honesty rather than backdating the ADR closure.

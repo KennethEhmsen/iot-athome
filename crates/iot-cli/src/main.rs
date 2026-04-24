@@ -13,7 +13,12 @@
 //! * `iotctl rule {add,list,delete,test}`: manage automation rules
 //!   (M3 W2.3). `test` dry-runs a rule against a synthetic payload
 //!   without touching the bus.
+//! * `iotctl nats {bootstrap,mint-user}`: NATS decentralized-auth
+//!   bootstrap (M5a W1). `bootstrap` mints the operator + account
+//!   trust root; `mint-user` issues a plugin user JWT + writes a
+//!   `.creds` file.
 
+mod nats;
 mod plugin;
 mod rule;
 
@@ -62,6 +67,10 @@ enum Command {
     /// from the same dir via iot-automation Config::rules_dir).
     #[command(subcommand)]
     Rule(rule::RuleCmd),
+    /// NATS decentralized-auth bootstrap and user-JWT minting.
+    /// No network I/O — pure keypair + JWT generation.
+    #[command(subcommand)]
+    Nats(nats::NatsCmd),
 }
 
 #[derive(Debug, Subcommand)]
@@ -116,6 +125,7 @@ async fn main() -> Result<()> {
         Command::Device(sub) => cmd_device(&cli.registry, sub).await,
         Command::Plugin(sub) => plugin::run(sub),
         Command::Rule(sub) => rule::run(sub),
+        Command::Nats(sub) => nats::run(sub),
     };
 
     iot_observability::shutdown();

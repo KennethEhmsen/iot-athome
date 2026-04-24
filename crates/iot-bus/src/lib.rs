@@ -32,6 +32,9 @@ pub enum BusError {
     Publish(#[from] async_nats::PublishError),
     #[error("missing mTLS cert path: {0}")]
     MissingCerts(&'static str),
+    /// Loading a `.creds` file failed (path missing, perms, …).
+    #[error("creds file: {0}")]
+    Creds(#[from] std::io::Error),
 }
 
 /// Connection configuration. mTLS is mandatory.
@@ -47,6 +50,13 @@ pub struct Config {
     pub client_key_path: std::path::PathBuf,
     /// Publisher identity (service or plugin id).
     pub publisher: String,
+    /// Optional NATS credentials file (the JWT + nkey blob produced
+    /// by `iotctl plugin install` post-install or by `iotctl nats
+    /// mint-user`). Used when the broker is running in operator-JWT
+    /// decentralized-auth mode (M5a W1). Falls back to mTLS-only
+    /// authentication when `None`, which is the pre-M5a dev path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creds_path: Option<std::path::PathBuf>,
 }
 
 impl Config {
@@ -59,18 +69,25 @@ impl Config {
     /// * `IOT_DEV_CERTS_ROOT` (default `./tools/devcerts/generated`)
     /// * `IOT_BUS_COMPONENT` — subdir under the certs root for this caller's
     ///   client cert. Defaults to `client` (the shared dev client identity).
+    /// * `IOT_NATS_CREDS` — path to a NATS `.creds` file with a user JWT +
+    ///   nkey seed. When set, `Bus::connect` uses it for decentralized-auth
+    ///   handshake (M5a W1). When unset, the connection is mTLS-only.
     #[must_use]
     pub fn from_env(publisher: impl Into<String>) -> Self {
         let dev_root = std::env::var("IOT_DEV_CERTS_ROOT")
             .unwrap_or_else(|_| "./tools/devcerts/generated".into());
         let component = std::env::var("IOT_BUS_COMPONENT").unwrap_or_else(|_| "client".into());
         let dev = std::path::PathBuf::from(&dev_root);
+        let creds_path = std::env::var("IOT_NATS_CREDS")
+            .ok()
+            .map(std::path::PathBuf::from);
         Self {
             url: std::env::var("IOT_NATS_URL").unwrap_or_else(|_| "tls://127.0.0.1:4222".into()),
             ca_path: dev.join("ca").join("ca.crt"),
             client_cert_path: dev.join(&component).join(format!("{component}.crt")),
             client_key_path: dev.join(&component).join(format!("{component}.key")),
             publisher: publisher.into(),
+            creds_path,
         }
     }
 }
@@ -83,16 +100,37 @@ pub struct Bus {
 }
 
 impl Bus {
-    /// Connect using mTLS.
+    /// Connect using mTLS, optionally with NATS decentralized-auth
+    /// credentials.
+    ///
+    /// When `cfg.creds_path` is set, the JWT + nkey seed in that
+    /// file are added to the connect options so the broker can
+    /// validate the user against its operator-signed account JWT
+    /// (M5a W1). When unset, only mTLS authenticates the
+    /// connection — the pre-M5a dev path.
+    ///
+    /// # Errors
+    /// `BusError::Connect` for TLS handshake failure, JWT-rejection
+    /// from the broker, or unreachable URL.
     #[instrument(skip(cfg), fields(publisher = %cfg.publisher, url = %cfg.url))]
     pub async fn connect(cfg: Config) -> Result<Self, BusError> {
-        let client = async_nats::ConnectOptions::new()
+        let mut opts = async_nats::ConnectOptions::new()
             .add_root_certificates(cfg.ca_path.clone())
             .add_client_certificate(cfg.client_cert_path.clone(), cfg.client_key_path.clone())
             .require_tls(true)
-            .name(cfg.publisher.clone())
-            .connect(&cfg.url)
-            .await?;
+            .name(cfg.publisher.clone());
+
+        if let Some(creds) = cfg.creds_path.as_ref() {
+            // Wraps a future internally — must `.await`. Failures
+            // here surface as `ConnectError::Authentication`.
+            opts = opts.credentials_file(creds).await?;
+            tracing::info!(
+                creds = %creds.display(),
+                "bus: using NATS user JWT credentials"
+            );
+        }
+
+        let client = opts.connect(&cfg.url).await?;
 
         Ok(Self {
             client,

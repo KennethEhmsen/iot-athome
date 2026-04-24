@@ -77,6 +77,17 @@ pub enum PluginCmd {
         /// Replace an existing install of the same id.
         #[arg(long)]
         force: bool,
+        /// Account seed file used to mint a per-plugin user JWT
+        /// post-install (M5a W1 — broker decentralized auth).
+        ///
+        /// When set (or `IOT_NATS_ACCOUNT_SEED` is in env), the
+        /// install writes a `nats.creds` file alongside the
+        /// `nats.nkey` + `acl.json` files so the runtime can connect
+        /// to a NATS server running in operator-JWT mode. When
+        /// unset, only the seed plus ACL are written and the runtime
+        /// falls back to mTLS-only — the pre-M5a dev path.
+        #[arg(long, env = "IOT_NATS_ACCOUNT_SEED")]
+        account_seed: Option<PathBuf>,
     },
     /// List installed plugins and their declared capabilities.
     List {
@@ -115,6 +126,7 @@ pub fn run(cmd: &PluginCmd) -> Result<()> {
             allow_unsigned,
             allow_vulnerabilities,
             force,
+            account_seed,
         } => install(
             path,
             plugin_dir,
@@ -122,6 +134,7 @@ pub fn run(cmd: &PluginCmd) -> Result<()> {
             *allow_unsigned,
             *allow_vulnerabilities,
             *force,
+            account_seed.as_deref(),
         ),
         PluginCmd::List {
             plugin_dir,
@@ -230,6 +243,7 @@ fn install(
     allow_unsigned: bool,
     allow_vulnerabilities: bool,
     force: bool,
+    account_seed: Option<&Path>,
 ) -> Result<()> {
     // 1. Parse + schema-check the manifest via the runtime's own parser.
     let manifest_path = src.join("manifest.yaml");
@@ -292,11 +306,61 @@ fn install(
     generate_nats_identity(&dest, &manifest.id, &manifest.capabilities)
         .context("generate NATS identity")?;
 
+    // 7. If an operator seed is configured, mint a user JWT against
+    //    the freshly-written nkey + ACL and write nats.creds. This is
+    //    the M5a W1 broker-decentralized-auth path; without an
+    //    account seed we leave the runtime to fall back to mTLS-only.
+    if let Some(seed_path) = account_seed {
+        mint_creds_post_install(&dest, &manifest.id, seed_path)
+            .context("mint per-plugin nats.creds")?;
+    } else {
+        tracing::info!(
+            plugin = %manifest.id,
+            "no IOT_NATS_ACCOUNT_SEED set — skipping nats.creds mint (mTLS-only fallback)"
+        );
+    }
+
     println!(
         "installed {} {} → {}",
         manifest.id,
         manifest.version,
         dest.display()
+    );
+    Ok(())
+}
+
+/// Read the just-written `nats.nkey` + `acl.json`, mint a user JWT
+/// against the configured account seed, write a `.creds` file with
+/// 0600 perms.
+///
+/// Kept on the install path (vs. spawning `iotctl nats mint-user`)
+/// to avoid the fork/exec when both halves live in this binary.
+fn mint_creds_post_install(dest: &Path, plugin_id: &str, account_seed_path: &Path) -> Result<()> {
+    let user_seed_path = dest.join("nats.nkey");
+    let acl_path = dest.join("acl.json");
+    let creds_path = dest.join("nats.creds");
+
+    let account_seed = fs::read_to_string(account_seed_path)
+        .with_context(|| format!("read account seed {}", account_seed_path.display()))?;
+    let account = nkeys::KeyPair::from_seed(account_seed.trim())
+        .map_err(|e| anyhow!("parse account seed: {e}"))?;
+
+    let user_seed = fs::read_to_string(&user_seed_path)
+        .with_context(|| format!("read {}", user_seed_path.display()))?;
+    let user =
+        nkeys::KeyPair::from_seed(user_seed.trim()).map_err(|e| anyhow!("parse user seed: {e}"))?;
+
+    let acl = crate::nats::parse_acl(&acl_path)?;
+    let creds = crate::nats::issue_and_format_creds(&account, &user, plugin_id, &acl)?;
+
+    fs::write(&creds_path, &creds).with_context(|| format!("write {}", creds_path.display()))?;
+    restrict_permissions(&creds_path)?;
+
+    tracing::info!(
+        plugin = %plugin_id,
+        creds = %creds_path.display(),
+        account = %account.public_key(),
+        "minted nats.creds"
     );
     Ok(())
 }
@@ -719,14 +783,14 @@ capabilities:
     }
 
     /// Signature-wise wrapper so the older tests don't have to spell out
-    /// the two allow-* / force booleans every call.
+    /// the two allow-* / force / account-seed knobs every call.
     fn install_allow_unsigned(
         src: &Path,
         dest: &Path,
         trust_pub: Option<&Path>,
         force: bool,
     ) -> Result<()> {
-        install(src, dest, trust_pub, true, false, force)
+        install(src, dest, trust_pub, true, false, force, None)
     }
 
     #[test]
@@ -735,7 +799,16 @@ capabilities:
         let installed = tempfile::tempdir().unwrap();
         write_staging(staging.path(), DEMO_MANIFEST, FAKE_WASM);
 
-        let err = install(staging.path(), installed.path(), None, false, false, false).unwrap_err();
+        let err = install(
+            staging.path(),
+            installed.path(),
+            None,
+            false,
+            false,
+            false,
+            None,
+        )
+        .unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("no signature"),
@@ -774,6 +847,7 @@ capabilities:
             false,
             false,
             false,
+            None,
         )
         .expect("install signed");
 
@@ -800,6 +874,7 @@ capabilities:
             false,
             false,
             false,
+            None,
         )
         .unwrap_err();
         let msg = format!("{err:#}");
@@ -807,6 +882,56 @@ capabilities:
             msg.contains("signature") || msg.contains("verification"),
             "expected sig-verification error, got: {msg}"
         );
+    }
+
+    #[test]
+    fn install_writes_creds_when_account_seed_set() {
+        let staging = tempfile::tempdir().unwrap();
+        let installed = tempfile::tempdir().unwrap();
+        write_staging(staging.path(), DEMO_MANIFEST, FAKE_WASM);
+
+        // Bootstrap a trust root the same way `iotctl nats bootstrap` does.
+        let trust_dir = tempfile::tempdir().unwrap();
+        let operator = nkeys::KeyPair::new_operator();
+        let account = nkeys::KeyPair::new_account();
+        let account_seed = account.seed().unwrap();
+        let seed_path = trust_dir.path().join("iot-account.nk");
+        fs::write(&seed_path, &account_seed).unwrap();
+
+        install(
+            staging.path(),
+            installed.path(),
+            None,
+            true,
+            false,
+            false,
+            Some(&seed_path),
+        )
+        .expect("install with creds mint");
+
+        let dest = installed.path().join("test-plugin");
+        let creds_path = dest.join("nats.creds");
+        assert!(
+            creds_path.is_file(),
+            "expected nats.creds at {creds_path:?}"
+        );
+
+        let creds = fs::read_to_string(&creds_path).unwrap();
+        assert!(creds.contains("-----BEGIN NATS USER JWT-----"));
+        assert!(creds.contains("-----BEGIN USER NKEY SEED-----"));
+
+        // The minted user JWT verifies under the account that signed it.
+        let jwt_start = creds.find("-----BEGIN NATS USER JWT-----\n").unwrap()
+            + "-----BEGIN NATS USER JWT-----\n".len();
+        let jwt_end = creds.find("\n------END NATS USER JWT------").unwrap();
+        let jwt = &creds[jwt_start..jwt_end];
+        let claims = iot_bus::jwt::verify_user_jwt(&account, jwt).expect("verify");
+        assert_eq!(claims.name, "test-plugin");
+        // And NOT under the operator — different trust tier.
+        assert!(matches!(
+            iot_bus::jwt::verify_user_jwt(&operator, jwt),
+            Err(iot_bus::jwt::JwtError::BadSignature)
+        ));
     }
 
     #[test]
@@ -910,7 +1035,16 @@ capabilities:
         .unwrap();
 
         // allow_unsigned + allow_vulnerabilities, no --force.
-        install(staging.path(), installed.path(), None, true, true, false).expect("install");
+        install(
+            staging.path(),
+            installed.path(),
+            None,
+            true,
+            true,
+            false,
+            None,
+        )
+        .expect("install");
         let dest = installed.path().join("test-plugin");
         assert!(dest.join("sbom.cdx.json").is_file());
     }
@@ -975,6 +1109,7 @@ capabilities:
             false,
             false,
             false,
+            None,
         )
         .unwrap();
 
@@ -1000,6 +1135,7 @@ capabilities:
             false,
             false,
             false,
+            None,
         )
         .unwrap();
 
@@ -1029,6 +1165,7 @@ capabilities:
             false,
             false,
             false,
+            None,
         )
         .unwrap();
 
