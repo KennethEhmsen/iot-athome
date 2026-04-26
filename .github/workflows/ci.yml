@@ -37,17 +37,17 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.84.0
           components: rustfmt, clippy
       - uses: bufbuild/buf-action@v1
         with: { setup_only: true }
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '22'
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v5
         with: { version: 9 }
 
       - name: typos
@@ -95,7 +95,7 @@ jobs:
           # which target wasip2; a dedicated plugin build matrix lands with
           # the SDK's WIT world.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.84.0
@@ -110,7 +110,7 @@ jobs:
           else
             cargo build --workspace --release --target ${{ matrix.target }}
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: binaries-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/iot-*
@@ -123,7 +123,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.84.0
@@ -139,7 +139,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.84.0
@@ -166,7 +166,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.84.0
@@ -178,7 +178,7 @@ jobs:
         run: |
           mkdir -p sbom
           find . -name 'bom.json' -exec cp {} sbom/ \;
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sbom
           path: sbom/
@@ -193,7 +193,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.84.0
@@ -214,9 +214,9 @@ jobs:
       attestations: write
       contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: sigstore/cosign-installer@v3
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6
+      - uses: sigstore/cosign-installer@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts/
       - name: cosign sign-blob (keyless)
@@ -236,7 +236,7 @@ jobs:
         # gate in M6"). When the repo goes public or moves to a paid plan,
         # flip this to `false` and sign will fail loudly on attestation
         # issues the way cosign already does.
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         continue-on-error: true
         with:
           subject-path: 'artifacts/**/iot-*'
@@ -249,7 +249,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.84.0
