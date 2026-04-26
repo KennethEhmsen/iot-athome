@@ -1,7 +1,7 @@
 //! Plugin SDK (Rust).
 //!
 //! Plugins compile to a WASM Component Model module targeting the
-//! `iot:plugin-host@1.3.0` WIT world ([schemas/wit/iot-plugin-host.wit]).
+//! `iot:plugin-host@1.4.0` WIT world ([schemas/wit/iot-plugin-host.wit]).
 //!
 //! Notable per-version changes plugin authors care about:
 //!   * 1.1.0 added the `mqtt` interface + `on-mqtt-message` runtime
@@ -15,6 +15,14 @@
 //!     so adapters drop their `registry::upsert_device(...)` calls and
 //!     simply publish state. Plugins built against 1.2.0 won't load
 //!     under a 1.3.0+ host.
+//!   * 1.4.0 added the **`net`** interface — outbound HTTP via
+//!     `iot::plugin_host::net::http(http_request)`. Plugins polling
+//!     external APIs (weather, energy tariffs, calendar feeds,
+//!     HTTP-shaped device APIs) declare URL prefixes in
+//!     `capabilities.net.outbound`; the host enforces an
+//!     exact-prefix match (with a path/query boundary safety
+//!     property — `acme.com` does not authorise `acme.com.evil`).
+//!     Additive — 1.3.0 plugins still load.
 //!
 //! Usage (from a plugin crate that depends on this SDK):
 //!

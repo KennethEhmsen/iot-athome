@@ -1,0 +1,24 @@
+[package]
+name = "weather-poller"
+version = "0.0.0-scaffold"
+edition = "2021"
+description = "IoT-AtHome — demo WASM plugin exercising the ABI 1.4.0 net.http capability against Open-Meteo. Scaffold."
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+# Built from this dir, target pinned in .cargo/config.toml to wasm32-wasip2.
+# Not a workspace member — see root Cargo.toml `exclude` list.
+
+[dependencies]
+iot-plugin-sdk-rust = { path = "../../crates/iot-plugin-sdk-rust" }
+iot-proto-core = { path = "../../crates/iot-proto-core" }
+
+prost = { version = "0.13", default-features = false, features = ["derive"] }
+prost-types = { version = "0.13", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[package.metadata.component]
+package = "iot:weather-poller"

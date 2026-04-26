@@ -15,6 +15,12 @@
 //   1.2.0 — registry host interface (transitional per ADR-0013);
 //           deprecated in M4 once M3 W1.2's registry bus-watcher
 //           shipped.
+//   1.4.0 — net host interface: outbound HTTP for plugins that poll
+//           external APIs (weather, energy tariffs, calendar,
+//           notification sinks, HTTP-based device APIs). Manifest
+//           declares URL prefixes via `capabilities.net.outbound`;
+//           the host enforces an exact-prefix match before issuing
+//           the request. Additive — 1.3.0 plugins still load.
 //
 // Breaking-change major bumps:
 //   1.3.0 — removes the `registry` host interface. M3 W1.2's
@@ -30,7 +36,7 @@
 // previous for a major cycle. 1.2.0 plugins targeting `import
 // registry` are NOT loadable under a 1.3.0 host — there's no
 // minor-version compatibility story for capability removal.
-package iot:plugin-host@1.3.0;
+package iot:plugin-host@1.4.0;
 
 interface types {
     /// Dotted-namespace stable error code (see ADR-0008).
@@ -107,6 +113,63 @@ interface mqtt {
     ) -> result<_, plugin-error>;
 }
 
+/// Net: outbound HTTP from inside the WASM sandbox (1.4.0+).
+///
+/// Plugins that poll external APIs (weather, dynamic energy
+/// tariffs, calendar feeds, HTTP-based device APIs like Shelly /
+/// Tasmota / ESPHome native, notification sinks like ntfy.sh /
+/// Pushover) declare URL prefixes in their manifest's
+/// `capabilities.net.outbound` array; the host enforces an
+/// exact-prefix match before issuing the request.
+///
+/// Implementation detail: the host runs `reqwest` with a 10 s
+/// default timeout, redirects disabled, and no automatic
+/// decompression. Non-2xx responses surface as `Ok(http-response)`
+/// with the status code populated — plugins decide whether 4xx /
+/// 5xx is an error or a "device says no" valid value. Network /
+/// timeout / DNS failures surface as `Err(plugin-error)` with code
+/// `net.transport`.
+interface net {
+    use types.{plugin-error};
+
+    /// One outbound HTTP request. Headers as a list-of-tuples
+    /// because WIT 0.2 doesn't have a list-typed map yet.
+    record http-request {
+        /// "GET" / "POST" / "PUT" / "PATCH" / "DELETE". Case-
+        /// insensitive on the wire; the host normalises.
+        method: string,
+        /// Full URL including scheme, host, and any query string.
+        /// Manifest URL-prefix check happens here.
+        url: string,
+        /// Request headers. Empty list = no headers beyond
+        /// reqwest's defaults (User-Agent, Accept-Encoding identity).
+        headers: list<tuple<string, string>>,
+        /// Optional request body. None for bodyless verbs (GET,
+        /// HEAD), Some for POST/PUT/PATCH.
+        body: option<list<u8>>,
+    }
+
+    record http-response {
+        /// HTTP status. 0 only when transport itself failed —
+        /// in that case the host returns Err and never produces
+        /// http-response anyway.
+        status: u16,
+        /// Response headers. Decoded via reqwest's HeaderMap iter.
+        headers: list<tuple<string, string>>,
+        /// Body bytes. Empty list when the response has no body
+        /// (e.g. 204, HEAD).
+        body: list<u8>,
+    }
+
+    /// Issue one HTTP request.
+    ///
+    /// Capability check: `req.url` must start with one of the
+    /// plugin manifest's `capabilities.net.outbound` URL prefixes.
+    /// Anything outside the allow-list returns Err with code
+    /// `capability.denied`.
+    http: func(req: http-request) -> result<http-response, plugin-error>;
+}
+
 /// Exports a plugin must implement.
 ///
 /// Grouping under an interface (rather than leaving as world-level free
@@ -143,5 +206,6 @@ world plugin {
     import bus;
     import log;
     import mqtt;
+    import net;
     export runtime;
 }

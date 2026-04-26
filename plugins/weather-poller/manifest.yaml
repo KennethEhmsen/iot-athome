@@ -1,0 +1,51 @@
+# IoT-AtHome weather poller — demo plugin for the ABI 1.4.0 net.http
+# capability. Polls Open-Meteo (free, no API key, public weather data)
+# and publishes one EntityState per metric on
+# `device.weather.<location>.<entity>.state`.
+#
+# Scaffold-only at v0.5.0-m5a (post-tag): init() proves the net.http
+# capability works end-to-end against Open-Meteo; the full poller +
+# scheduler land in a follow-up commit. This is the canonical "show
+# what a net.outbound plugin looks like" reference for future
+# integrations (Tibber, Octopus Agile, calendar feeds, ntfy.sh, etc.).
+
+schema_version: 1
+id: weather-poller
+name: Weather Poller (demo)
+version: 0.0.0-scaffold
+description: >
+  Demo plugin exercising the ABI 1.4.0 net.http capability against
+  Open-Meteo (free public weather API). Reference shape for future
+  HTTP-poll integrations. Not feature-complete; init-only smoke test.
+authors: ["IoT-AtHome"]
+license: "Apache-2.0 OR MIT"
+
+runtime: wasm-component
+abi:
+  world: iot:plugin-host
+  version: 1.4.0
+entrypoint: plugin.wasm
+
+capabilities:
+  bus:
+    publish:
+      - "device.weather.>"
+  net:
+    outbound:
+      # Open-Meteo's forecast endpoint. Path-or-query boundary check
+      # in the host means this allows /v1/forecast?... but blocks
+      # api.open-meteo.com.evil.example/whatever.
+      - "https://api.open-meteo.com"
+
+resources:
+  memory_mb_max: 32
+  cpu_pct_max: 5
+  fuel_max: 10000000
+
+signatures:
+  - mechanism: cosign-keyless
+    rekor_entry: "DEV-UNSIGNED"
+    identity: "dev@localhost"
+    issuer: "dev"
+
+sbom: sbom.cdx.json

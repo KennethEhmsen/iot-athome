@@ -41,6 +41,11 @@ exclude = [
   # python-matter-server upstream + a small WS→MQTT shim publish on
   # `matter/nodes/+/+/+/+/+`, this plugin subscribes there.
   "plugins/matter-bridge",
+  # weather-poller — demo for the ABI 1.4.0 net.http capability.
+  # Reference shape for HTTP-poll plugins (Tibber, Octopus, calendar,
+  # ntfy, Shelly local, etc.). Scaffold; full poller + scheduler land
+  # once the SDK gains a tokio-equivalent timer primitive.
+  "plugins/weather-poller",
 ]
 
 [workspace.package]

@@ -135,6 +135,60 @@ impl CapabilityMap {
             message: format!("mqtt.subscribe on `{filter}` not in manifest allow-list"),
         })
     }
+
+    /// Check an outbound URL against the `net.outbound` allow-list.
+    ///
+    /// Match semantics: URL-prefix match with a path-or-query
+    /// boundary check, so an entry of `https://api.open-meteo.com`
+    /// authorises:
+    ///
+    /// * `https://api.open-meteo.com`            — exact equality
+    /// * `https://api.open-meteo.com/v1/forecast` — path under
+    /// * `https://api.open-meteo.com?q=1`         — query directly
+    /// * `https://api.open-meteo.com#frag`        — fragment directly
+    ///
+    /// but NOT `https://api.open-meteo.com.evil.example/x` — the
+    /// next character past the prefix must be one of `/`, `?`, `#`,
+    /// or end-of-string. This is the same safety property the
+    /// `Origin` header check uses in browsers; without it,
+    /// `acme.com` would authorise `acme.com.evil.example`.
+    ///
+    /// Operators who want exact-host authority can simply write the
+    /// scheme + host + trailing `/` (`https://api.open-meteo.com/`);
+    /// operators who want a sub-path scope write the full sub-path.
+    ///
+    /// # Errors
+    /// Returns [`Denied`] if `url` isn't covered by an allow-list
+    /// entry. The error code is the standard
+    /// `capability.denied`.
+    pub fn check_net_outbound(&self, url: &str) -> Result<(), Denied> {
+        if self
+            .net
+            .outbound
+            .iter()
+            .any(|p| url_starts_with_boundary(p, url))
+        {
+            return Ok(());
+        }
+        Err(Denied {
+            code: "capability.denied",
+            message: format!("net.outbound on `{url}` not in manifest allow-list"),
+        })
+    }
+}
+
+/// URL-prefix match with the path/query/fragment boundary safety
+/// property described on [`CapabilityMap::check_net_outbound`].
+fn url_starts_with_boundary(prefix: &str, url: &str) -> bool {
+    if !url.starts_with(prefix) {
+        return false;
+    }
+    match url.as_bytes().get(prefix.len()) {
+        // Exact match (URL == prefix).
+        None => true,
+        // Path / query / fragment boundary.
+        Some(&c) => matches!(c, b'/' | b'?' | b'#'),
+    }
 }
 
 /// Naive NATS-style match. `foo.>` matches `foo.anything.deep`; `foo.bar`
@@ -319,5 +373,101 @@ mod tests {
         assert!(m.check_mqtt_subscribe("zigbee2mqtt/#").is_ok());
         // Different prefix: denied.
         assert!(m.check_mqtt_subscribe("actuators/#").is_err());
+    }
+
+    // --------------------------------------------------- net.outbound tests
+
+    fn net_only(outbound: Vec<&str>) -> CapabilityMap {
+        CapabilityMap {
+            net: NetCapabilities {
+                outbound: outbound.into_iter().map(String::from).collect(),
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn net_outbound_authorises_exact_match() {
+        let m = net_only(vec!["https://api.open-meteo.com"]);
+        assert!(m.check_net_outbound("https://api.open-meteo.com").is_ok());
+    }
+
+    #[test]
+    fn net_outbound_authorises_path_under_prefix() {
+        let m = net_only(vec!["https://api.open-meteo.com"]);
+        assert!(m
+            .check_net_outbound("https://api.open-meteo.com/v1/forecast")
+            .is_ok());
+        assert!(m
+            .check_net_outbound("https://api.open-meteo.com/v1/forecast?lat=1&lon=2")
+            .is_ok());
+        assert!(m
+            .check_net_outbound("https://api.open-meteo.com#frag")
+            .is_ok());
+    }
+
+    #[test]
+    fn net_outbound_blocks_dotted_suffix_attacker() {
+        // The classic Origin-header attack: prefix `acme.com` must
+        // not authorise `acme.com.evil.example`. The boundary check
+        // requires the next char past the prefix to be /, ?, #, or
+        // end-of-string.
+        let m = net_only(vec!["https://api.open-meteo.com"]);
+        assert!(m
+            .check_net_outbound("https://api.open-meteo.com.evil.example/x")
+            .is_err());
+        assert!(m
+            .check_net_outbound("https://api.open-meteo.commerce.example")
+            .is_err());
+    }
+
+    #[test]
+    fn net_outbound_blocks_unknown_host() {
+        let m = net_only(vec!["https://api.open-meteo.com"]);
+        assert!(m
+            .check_net_outbound("https://api.tibber.com/v1/gql")
+            .is_err());
+    }
+
+    #[test]
+    fn net_outbound_with_path_scope_only_authorises_subpath() {
+        // Operator wants the plugin to hit only one specific path.
+        let m = net_only(vec!["https://api.acme.com/v1/forecast"]);
+        assert!(m
+            .check_net_outbound("https://api.acme.com/v1/forecast")
+            .is_ok());
+        assert!(m
+            .check_net_outbound("https://api.acme.com/v1/forecast/2026-04")
+            .is_ok());
+        assert!(m
+            .check_net_outbound("https://api.acme.com/v1/forecast?q=x")
+            .is_ok());
+        // Different path under the same host: denied.
+        assert!(m
+            .check_net_outbound("https://api.acme.com/v1/billing")
+            .is_err());
+    }
+
+    #[test]
+    fn net_outbound_default_is_deny_all() {
+        let m = CapabilityMap::default();
+        assert!(m.check_net_outbound("https://api.open-meteo.com").is_err());
+    }
+
+    #[test]
+    fn net_outbound_multiple_prefixes_combine() {
+        let m = net_only(vec![
+            "https://api.open-meteo.com",
+            "https://api.tibber.com/v1/gql",
+        ]);
+        assert!(m
+            .check_net_outbound("https://api.open-meteo.com/v1/forecast")
+            .is_ok());
+        assert!(m
+            .check_net_outbound("https://api.tibber.com/v1/gql")
+            .is_ok());
+        assert!(m
+            .check_net_outbound("https://api.tibber.com/v1/billing")
+            .is_err());
     }
 }

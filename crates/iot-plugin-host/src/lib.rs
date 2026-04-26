@@ -69,6 +69,43 @@ pub struct HostBindings {
     /// host-internal use (per-plugin admin RPCs in future) and may
     /// drop entirely in a later major.
     pub registry: Option<tonic::transport::Channel>,
+    /// Shared `reqwest::Client` backing the ABI 1.4.0 `net.http`
+    /// host capability. One client per host process so connection
+    /// pooling is preserved across plugins. Build with
+    /// [`build_net_client`] at host startup; tests + offline
+    /// loaders pass `None` and `net::Host::http` then surfaces
+    /// `net.not_configured` to plugins.
+    pub net_client: Option<Arc<reqwest::Client>>,
+}
+
+/// Build the shared `reqwest::Client` the host's `net.http`
+/// capability uses.
+///
+/// Defaults chosen for safety / predictability:
+///
+/// * 10 s total request timeout — plugins can't wedge the host on a
+///   slow upstream.
+/// * Redirects disabled — auto-following redirects could land a
+///   plugin's request on a host outside its `capabilities.net.outbound`
+///   allow-list. Plugins handle 3xx explicitly.
+/// * No automatic decompression — body bytes pass through opaque,
+///   plugins decode if they want.
+///
+/// # Errors
+/// Returns the underlying `reqwest::Error` when the client builder
+/// fails. Should never happen in practice (no remote calls during
+/// build), but kept on the public API so a misconfigured rustls
+/// init surfaces fast.
+pub fn build_net_client() -> Result<Arc<reqwest::Client>> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .build()
+        .context("build host net.http reqwest client")?;
+    Ok(Arc::new(client))
 }
 
 /// Construct a Wasmtime Engine preconfigured for the Component Model + async
@@ -150,6 +187,11 @@ pub async fn load_plugin(
     // capability — no `registry::add_to_linker` to call here. The
     // PluginState `registry` channel field remains for future per-
     // plugin admin RPCs.
+    crate::component::iot::plugin_host::net::add_to_linker::<_, HasSelf<PluginState>>(
+        &mut linker,
+        |s| s,
+    )
+    .context("link net host")?;
 
     let state = PluginState {
         id: plugin_id.to_owned(),
@@ -158,6 +200,7 @@ pub async fn load_plugin(
         audit: bindings.audit,
         mqtt: bindings.mqtt,
         registry: bindings.registry,
+        net_client: bindings.net_client,
         // `self_tx` is filled in by `spawn_plugin_task` after the
         // mpsc channel is created — we can't know it here because
         // load_plugin is the synchronous side of construction.

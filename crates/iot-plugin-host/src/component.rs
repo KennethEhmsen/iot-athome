@@ -1,11 +1,11 @@
-//! Host-side bindings for the `iot:plugin-host@1.3.0` WIT world.
+//! Host-side bindings for the `iot:plugin-host@1.4.0` WIT world.
 //!
 //! `wasmtime::component::bindgen!` generates:
 //!  * A `Plugin` type wrapping an instantiated component.
-//!  * Host traits on the generated `bus::Host` + `log::Host` + `mqtt::Host` —
-//!    implemented below on [`PluginState`].
-//!  * `call_runtime_init` / `call_runtime_on_message` / `call_runtime_on_mqtt_message`
-//!    accessors.
+//!  * Host traits on the generated `bus::Host` + `log::Host` +
+//!    `mqtt::Host` + `net::Host` — implemented below on [`PluginState`].
+//!  * `call_runtime_init` / `call_runtime_on_message` /
+//!    `call_runtime_on_mqtt_message` accessors.
 //!
 //! ABI evolution (see also `schemas/wit/iot-plugin-host.wit`):
 //!  * 1.1.0 — added the `mqtt` interface + `on-mqtt-message` export
@@ -16,6 +16,11 @@
 //!    `device.>` publishes; adapters drop the explicit upsert call.
 //!    Plugins built against 1.2.0 won't load — wasmtime errors at
 //!    instantiation when their unresolved import isn't satisfied.
+//!  * 1.4.0 — additive `net.http` host capability for outbound HTTP.
+//!    Plugins declare URL prefixes in `capabilities.net.outbound`;
+//!    host enforces an exact-prefix match before issuing the request.
+//!    1.3.0 plugins still load (additive — the `import net;` line is
+//!    new but the host satisfies it whether the plugin uses it or not).
 
 #![allow(
     clippy::all,
@@ -64,6 +69,12 @@ pub struct PluginState {
     /// + future per-plugin admin RPCs. `None` in offline / unit-test
     /// setups.
     pub registry: Option<tonic::transport::Channel>,
+    /// Shared HTTP client backing the ABI 1.4.0 `net.http` host
+    /// capability. One per host process so connection pooling
+    /// survives across plugins. `None` in offline / unit-test setups
+    /// — `net::Host::http` then returns `net.not_configured` to the
+    /// plugin.
+    pub net_client: Option<Arc<reqwest::Client>>,
     /// This plugin's own mailbox, used when registering with
     /// `MqttRouter` so inbound messages route back to us. Filled in by
     /// [`crate::runtime::spawn_plugin_task`] after the mpsc channel
@@ -317,3 +328,118 @@ impl crate::component::iot::plugin_host::mqtt::Host for PluginState {
 // register the device. The host's per-plugin `registry` channel
 // field stays in PluginState (kept for the gRPC-stream metadata path
 // + future per-plugin admin RPCs); only the WASM import is gone.
+
+// ---------- net host impl (ABI 1.4.0) ----------
+//
+// Outbound HTTP for plugins polling external APIs. URL-prefix check
+// against the manifest's `capabilities.net.outbound` allow-list
+// runs FIRST — anything outside the allow-list returns
+// capability.denied without touching reqwest, so a misconfigured
+// plugin can't trigger DNS or TCP traffic against unintended hosts.
+//
+// Transport-level failures (DNS, TCP, TLS, timeout) surface as
+// `net.transport`. HTTP-level failures (4xx / 5xx) surface as
+// `Ok(http-response)` with the status code populated — plugins
+// decide whether a 404 or 500 is "this device says no" or a real
+// error. Body is opaque bytes; reqwest's automatic gzip / brotli /
+// deflate are all disabled by `build_net_client`, so plugins see
+// what came off the wire.
+
+impl crate::component::iot::plugin_host::net::Host for PluginState {
+    #[tracing::instrument(
+        name = "host_call",
+        skip(self, req),
+        fields(
+            plugin = %self.id,
+            capability = "net.http",
+            method = %req.method,
+            url = %req.url,
+            req_bytes = req.body.as_ref().map_or(0, Vec::len),
+        ),
+    )]
+    async fn http(
+        &mut self,
+        req: crate::component::iot::plugin_host::net::HttpRequest,
+    ) -> Result<crate::component::iot::plugin_host::net::HttpResponse, PluginError> {
+        // 1. Manifest URL-prefix check.
+        if let Err(d) = self.capabilities.check_net_outbound(&req.url) {
+            warn!(reason = d.code, "capability.denied");
+            record_denied(
+                self.audit.clone(),
+                self.id.clone(),
+                format!("net.http({} {})", req.method, req.url),
+                d.code.to_string(),
+            )
+            .await;
+            return Err(PluginError {
+                code: d.code.to_string(),
+                message: d.message,
+            });
+        }
+
+        // 2. Pull the shared client. Tests + offline loaders pass
+        // None for `net_client`; surface as `net.not_configured` so
+        // the plugin sees a clear, actionable error code.
+        let Some(client) = self.net_client.as_ref() else {
+            return Err(PluginError {
+                code: "net.not_configured".into(),
+                message: "host has no net.http client — was build_net_client called?".into(),
+            });
+        };
+
+        // 3. Translate WIT request → reqwest::RequestBuilder.
+        // Method is normalised to upper-case; reqwest::Method::from_bytes
+        // accepts the canonical set + emits a sensible error for
+        // garbage like "GETTT".
+        let method = reqwest::Method::from_bytes(req.method.to_ascii_uppercase().as_bytes())
+            .map_err(|e| PluginError {
+                code: "net.bad_method".into(),
+                message: format!("invalid HTTP method `{}`: {e}", req.method),
+            })?;
+        let mut builder = client.request(method, &req.url);
+        for (k, v) in &req.headers {
+            builder = builder.header(k.as_str(), v.as_str());
+        }
+        if let Some(body) = req.body {
+            builder = builder.body(body);
+        }
+
+        // 4. Execute. Transport-level failures (DNS, TCP, TLS,
+        // timeout) → net.transport. HTTP-level (4xx/5xx) lands as
+        // Ok with the status code populated.
+        let resp = builder.send().await.map_err(|e| {
+            warn!(error = %e, "net.http transport failed");
+            PluginError {
+                code: "net.transport".into(),
+                message: format!("{e}"),
+            }
+        })?;
+
+        let status = resp.status().as_u16();
+        let headers: Vec<(String, String)> = resp
+            .headers()
+            .iter()
+            .filter_map(|(k, v)| {
+                v.to_str()
+                    .ok()
+                    .map(|s| (k.as_str().to_owned(), s.to_owned()))
+            })
+            .collect();
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| PluginError {
+                code: "net.transport".into(),
+                message: format!("read body: {e}"),
+            })?
+            .to_vec();
+        let resp_bytes = body.len();
+        debug!(status, resp_bytes, "net.http ok");
+
+        Ok(crate::component::iot::plugin_host::net::HttpResponse {
+            status,
+            headers,
+            body,
+        })
+    }
+}

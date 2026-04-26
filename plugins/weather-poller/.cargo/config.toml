@@ -1,0 +1,3 @@
+# Default build target: wasm32-wasip2.
+[build]
+target = "wasm32-wasip2"
