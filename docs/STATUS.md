@@ -1,10 +1,10 @@
 # IoT-AtHome — Project Status
 
-**As of:** 2026-04-24 (post-M5a)
-**Head:** `24e7f3e` (M5a W4.1: TimescaleDB optional long-term history backend)
+**As of:** 2026-04-26 (post-M5a, ABI 1.4.0 follow-up)
+**Head:** ABI 1.4.0 — `net::http` host capability + weather-poller scaffold
 **Shipped releases:** `v0.1.0-m1` (2026-04-21), `v0.2.0-m2` (2026-04-23), `v0.3.0-m3` (2026-04-23), `v0.4.0-m4` (2026-04-24), `v0.5.0-m5a` (2026-04-24)
 **Next release target:** Command Central v1 PWA (own milestone, M5a.5 / pre-M5b)
-**Commits since M4:** 8
+**Commits since M4:** 9
 
 > This file is a point-in-time snapshot. Regenerate before every milestone
 > boundary. Consult `docs/Mn-PLAN.md` + `docs/Mn-RETROSPECTIVE.md` + `docs/adr/`
@@ -133,6 +133,25 @@ monitors, water-meter pulse counters. `device_id_from_envelope`
 builds NATS-safe canonical ids. **3 plugins now ship in parallel**
 (demo-echo, z2m, sdr433-adapter).
 
+### ABI 1.4.0 — `net::http` host capability (post-M5a follow-up)
+
+Additive minor bump in `schemas/wit/iot-plugin-host.wit` (1.3.0 →
+1.4.0). New `interface net` with a single `http(req) ->
+result<http-response, plugin-error>` import; `world plugin` gains
+`import net`. Host impl in `iot_plugin_host::component` runs the
+shared `reqwest::Client` (rustls-only, redirects disabled, 10 s
+default timeout) under the existing fuel + tracing harness.
+Capability check `CapabilityMap::check_net_outbound(url)` does
+byte-prefix matching against `capabilities.net.outbound`; trailing
+`/` in the declared prefix is the load-bearing piece that stops a
+host suffix attack (e.g. `api.open-meteo.com.attacker.tld`). Non-2xx
+responses surface as `Ok(http-response)`, not `Err` — plugins own
+the status-code policy. New `weather-poller` plugin scaffold under
+`plugins/weather-poller/` exercises the surface against
+`api.open-meteo.com`. Unblocks the M5a integration-gap class
+(weather APIs, dynamic energy tariffs, calendar, notification sinks,
+HTTP-based device APIs) that previously had no host primitive.
+
 ### Optional TimescaleDB long-term history (W4.1)
 
 New `iot-history` crate. `HistoryStore` wrapping a sqlx PgPool.
@@ -163,9 +182,9 @@ stable error codes (`history.disabled` → 503,
 | `iot-registry` | `bus_watcher::with_history(HistoryStore)` builder; mirrors `device.>` publishes when configured. `lib.rs` run() init reads `IOT_TIMESCALE_URL`. |
 | `iot-gateway` | New `GET /api/v1/devices/{id}/history` handler. `AppState.history: Option<HistoryStore>`. WS handler wildcard-replay branch. |
 | `iot-automation` | `expr.rs` — full crate-roll into cel-interpreter 0.10 wrap behind unchanged facade. `cel-interpreter` workspace dep. |
-| `iot-plugin-host` | `runtime::DEFAULT_FUEL_PER_CALL` + per-call refuel; `MqttBroker.filter_refcount` + `unsubscribe_filter`; `MqttRouter::unregister` returns dropped filters; `registry::Host` impl removed. **New `mqtt_acl` module.** |
+| `iot-plugin-host` | `runtime::DEFAULT_FUEL_PER_CALL` + per-call refuel; `MqttBroker.filter_refcount` + `unsubscribe_filter`; `MqttRouter::unregister` returns dropped filters; `registry::Host` impl removed. **New `mqtt_acl` module.** **New `net::Host` impl + `build_http_client` (ABI 1.4.0).** |
 | `iot-cli` | New `iotctl nats {bootstrap, mint-user}` + `iotctl mosquitto regen-acl` subcommands. `plugin install --account-seed` flag + post-install creds-mint hook. |
-| `iot-plugin-sdk-rust` | Doc comment refresh for ABI 1.3.0 surface. |
+| `iot-plugin-sdk-rust` | Doc comment refresh for ABI 1.3.0 surface; ABI 1.4.0 surface added (`net::http`). |
 
 ### End-to-end paths (current as of v0.5.0-m5a)
 
@@ -210,6 +229,7 @@ Panel reload → gateway WS handler subscribes →
 | Per-plugin NATS identity | ✅ | **NEW M5a** — `iotctl nats bootstrap` + per-plugin user JWTs |
 | End-to-end traceparent | ✅ | server-side gRPC interceptor M4 closure |
 | `registry::upsert-device` removed | ✅ | **M5a W1.8** ABI 1.3.0 |
+| `net.outbound` host capability | ✅ | **NEW post-M5a** — ABI 1.4.0 `net::http`, manifest URL-prefix allow-list |
 | Real CEL interpreter | ✅ | **NEW M5a** — cel-interpreter 0.10 |
 | Wildcard JetStream replay | ✅ | **NEW M5a** |
 | Per-call fuel refuel | ✅ | **NEW M5a** — 10M default, manifest-overridable |
@@ -242,6 +262,7 @@ documents the two-step crypto-then-wiring path. No new ADRs in M5a.
 | M5a W3 (1+2) | 135 (+13: 5 mqtt refcount, 5 mqtt_acl, 3 mosquitto regen-acl) |
 | M5a W3.4 | 135 + 14 sdr433 plugin-local |
 | **M5a W4.1** | **138** (+3: 2 iot-history + 1 bus_watcher history-token) |
+| **post-M5a ABI 1.4.0** | **144** (+6 net.outbound capability tests) |
 
 Zero workspace flakes during M5a. All clippy / deny gates clean on
 every push.

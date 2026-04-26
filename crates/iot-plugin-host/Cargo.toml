@@ -28,6 +28,11 @@ async-trait.workspace = true
 # Host owns the one MQTT broker connection per process and fans out
 # inbound messages to plugins via MqttRouter. See ADR-0013.
 rumqttc.workspace = true
+# ABI 1.4.0 `net::http` host import: one shared rustls-backed reqwest
+# Client, capability-checked per call against the plugin manifest's
+# `net.outbound` URL-prefix allow-list. Default-features off keeps us
+# off OpenSSL + native-tls (banned by ADR-0006).
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true

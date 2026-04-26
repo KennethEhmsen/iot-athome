@@ -1,0 +1,55 @@
+# IoT-AtHome weather-poller (WASM plugin, ABI 1.4.0 demo).
+#
+# First plugin to exercise the `net::http` host capability added in
+# 1.4.0. On init() it fetches a current-conditions snapshot from
+# Open-Meteo (no API key required) and emits one log line summarising
+# what it got. The full bus.publish path
+# (`device.weather.<location>.<entity>.state` EntityState protobufs)
+# graduates with the next slice — this manifest is intentionally
+# scaffold-shape: enough to demonstrate the capability check + reqwest
+# plumbing end-to-end without a complete integration.
+#
+# The capability section is the load-bearing piece for this slice:
+# the host enforces every `net::http` call against `net.outbound`
+# at host-call time. Anything outside the allow-list returns
+# `capability.denied` per ADR-0003.
+
+schema_version: 1
+id: weather-poller
+name: Weather Poller (Open-Meteo)
+version: 0.1.0
+description: >
+  Demonstrates the ABI 1.4.0 net::http host capability against the
+  Open-Meteo public API. Scaffold — full bus.publish integration in a
+  follow-up slice.
+authors: ["IoT-AtHome"]
+license: "Apache-2.0 OR MIT"
+
+runtime: wasm-component
+abi:
+  world: iot:plugin-host
+  version: 1.4.0
+entrypoint: plugin.wasm
+
+capabilities:
+  net:
+    outbound:
+      # Trailing `/` is intentional — without it a host suffix attack
+      # like `api.open-meteo.com.attacker.tld` would prefix-match.
+      - "https://api.open-meteo.com/"
+  bus:
+    publish:
+      - "device.weather.>"
+
+resources:
+  memory_mb_max: 32
+  cpu_pct_max: 5
+  fuel_max: 10000000
+
+signatures:
+  - mechanism: cosign-keyless
+    rekor_entry: "DEV-UNSIGNED"
+    identity: "dev@localhost"
+    issuer: "dev"
+
+sbom: sbom.cdx.json

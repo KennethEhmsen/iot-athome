@@ -1,7 +1,7 @@
 //! Plugin SDK (Rust).
 //!
 //! Plugins compile to a WASM Component Model module targeting the
-//! `iot:plugin-host@1.3.0` WIT world ([schemas/wit/iot-plugin-host.wit]).
+//! `iot:plugin-host@1.4.0` WIT world ([schemas/wit/iot-plugin-host.wit]).
 //!
 //! Notable per-version changes plugin authors care about:
 //!   * 1.1.0 added the `mqtt` interface + `on-mqtt-message` runtime
@@ -15,6 +15,20 @@
 //!     so adapters drop their `registry::upsert_device(...)` calls and
 //!     simply publish state. Plugins built against 1.2.0 won't load
 //!     under a 1.3.0+ host.
+//!   * 1.4.0 added the `net` interface (single import: `net::http`).
+//!     One-shot HTTP outbound, capability-checked against the
+//!     manifest's `capabilities.net.outbound` URL-prefix allow-list —
+//!     anything outside the list returns
+//!     `PluginError { code: "capability.denied", … }`. The host
+//!     enforces a default 10-second timeout, disables automatic
+//!     redirects (3xx is surfaced verbatim — the plugin decides
+//!     whether to retarget; the next URL must also be allow-listed),
+//!     and disables compression negotiation. Non-2xx responses come
+//!     back as `Ok(http-response)`, not `Err` — the plugin owns the
+//!     status-code policy. Strictly additive: 1.3.0 plugins continue
+//!     to load against a 1.4.0 host. Unblocks the M5a-gap class of
+//!     integrations (weather, dynamic energy tariffs, calendar,
+//!     notification sinks, HTTP-based device APIs).
 //!
 //! Usage (from a plugin crate that depends on this SDK):
 //!

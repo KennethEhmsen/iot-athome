@@ -113,6 +113,35 @@ impl CapabilityMap {
         })
     }
 
+    /// Check an outbound HTTP URL against the `net.outbound` allow-list.
+    ///
+    /// Matching rule: the request URL must *start with* one of the manifest's
+    /// declared `net.outbound` entries (byte-prefix). Plugins typically declare
+    /// e.g. `https://api.open-meteo.com/`, which then permits
+    /// `https://api.open-meteo.com/v1/forecast?...` but rejects
+    /// `https://api.open-meteo.com.evil.example/`. Plugins that want to talk to
+    /// a specific host root should include the trailing `/`.
+    ///
+    /// Added in ABI 1.4.0 along with the `net::http` host import.
+    ///
+    /// # Errors
+    /// Returns [`Denied`] if `url` isn't covered by an allow-list entry, or if
+    /// the manifest declares no `net.outbound` prefixes at all.
+    pub fn check_net_outbound(&self, url: &str) -> Result<(), Denied> {
+        if self
+            .net
+            .outbound
+            .iter()
+            .any(|prefix| url.starts_with(prefix))
+        {
+            return Ok(());
+        }
+        Err(Denied {
+            code: "capability.denied",
+            message: format!("net.outbound to `{url}` not in manifest allow-list"),
+        })
+    }
+
     /// Check an MQTT topic filter against the `mqtt.subscribe` allow-list.
     /// The *plugin-requested* filter must itself match one of the manifest-
     /// declared filters under MQTT wildcard semantics — i.e. the plugin can
@@ -319,5 +348,72 @@ mod tests {
         assert!(m.check_mqtt_subscribe("zigbee2mqtt/#").is_ok());
         // Different prefix: denied.
         assert!(m.check_mqtt_subscribe("actuators/#").is_err());
+    }
+
+    // -------------------------------------------------- net.outbound tests
+
+    fn net_only(outbound: Vec<&str>) -> CapabilityMap {
+        CapabilityMap {
+            net: NetCapabilities {
+                outbound: outbound.into_iter().map(String::from).collect(),
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn net_outbound_allows_declared_prefix() {
+        let m = net_only(vec!["https://api.open-meteo.com/"]);
+        // Exact prefix + a path/query underneath: allowed.
+        assert!(m
+            .check_net_outbound("https://api.open-meteo.com/v1/forecast?lat=1&lon=2")
+            .is_ok());
+    }
+
+    #[test]
+    fn net_outbound_denies_other_hosts() {
+        let m = net_only(vec!["https://api.open-meteo.com/"]);
+        assert!(m.check_net_outbound("https://evil.example/").is_err());
+    }
+
+    #[test]
+    fn net_outbound_denies_subdomain_lookalike() {
+        // The trailing `/` in the declared prefix is what stops a host
+        // suffix attack like `api.open-meteo.com.attacker.tld`.
+        let m = net_only(vec!["https://api.open-meteo.com/"]);
+        assert!(m
+            .check_net_outbound("https://api.open-meteo.com.attacker.tld/v1/forecast")
+            .is_err());
+    }
+
+    #[test]
+    fn net_outbound_denies_scheme_downgrade() {
+        // Prefix is byte-literal — declaring https:// does not also
+        // permit http://.
+        let m = net_only(vec!["https://api.open-meteo.com/"]);
+        assert!(m
+            .check_net_outbound("http://api.open-meteo.com/v1/forecast")
+            .is_err());
+    }
+
+    #[test]
+    fn net_outbound_empty_denies_everything() {
+        let m = CapabilityMap::default();
+        assert!(m.check_net_outbound("https://example.com/").is_err());
+    }
+
+    #[test]
+    fn net_outbound_multiple_prefixes_any_match() {
+        let m = net_only(vec![
+            "https://api.open-meteo.com/",
+            "https://api.tibber.com/v1-beta/",
+        ]);
+        assert!(m
+            .check_net_outbound("https://api.open-meteo.com/v1/forecast")
+            .is_ok());
+        assert!(m
+            .check_net_outbound("https://api.tibber.com/v1-beta/gql")
+            .is_ok());
+        assert!(m.check_net_outbound("https://api.tibber.com/v2/").is_err());
     }
 }

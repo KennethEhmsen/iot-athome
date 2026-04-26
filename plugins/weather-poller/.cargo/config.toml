@@ -1,0 +1,8 @@
+# Default build target for this plugin. Any `cargo build` (or `check`,
+# `clippy`, etc.) from this directory produces a wasm32-wasip2 component.
+#
+# Host-target builds are never useful for a cdylib plugin — the workspace
+# root's Cargo.toml excludes this directory from the main cargo workspace.
+
+[build]
+target = "wasm32-wasip2"

@@ -69,6 +69,41 @@ pub struct HostBindings {
     /// host-internal use (per-plugin admin RPCs in future) and may
     /// drop entirely in a later major.
     pub registry: Option<tonic::transport::Channel>,
+    /// Shared HTTP client for the ABI 1.4.0 `net::http` host import.
+    /// One per host process — `reqwest::Client` is internally
+    /// `Arc<...>` and reuses its connection pool across clones.
+    /// `None` in unit-test setups (the capability check still
+    /// enforces; the call degrades to `net.unconfigured`).
+    pub http: Option<reqwest::Client>,
+}
+
+/// Default request timeout for the ABI 1.4.0 `net::http` host import.
+///
+/// Per-plugin overrides land in a later minor; for now every outbound
+/// HTTP call shares this ceiling so a misbehaving target can't pin a
+/// plugin task indefinitely.
+pub const DEFAULT_NET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Build the shared outbound HTTP client used by the `net::http` host
+/// import. Configured to:
+///   * reject automatic redirects — a 3xx is surfaced verbatim so the
+///     plugin (and its capability allow-list) governs the next URL.
+///   * apply a [`DEFAULT_NET_TIMEOUT`] cap to every request.
+///
+/// Automatic decompression (gzip / brotli / deflate) is implicitly off:
+/// the workspace `reqwest` is built with `default-features = false`, so
+/// those decoder features are never enabled. Plugins that want
+/// compressed responses set `Accept-Encoding` explicitly and decode the
+/// body themselves.
+///
+/// rustls (workspace `reqwest` feature `rustls-tls`) is the only TLS
+/// backend; OpenSSL is banned by ADR-0006 / `deny.toml`.
+pub fn build_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(DEFAULT_NET_TIMEOUT)
+        .build()
+        .context("build outbound HTTP client")
 }
 
 /// Construct a Wasmtime Engine preconfigured for the Component Model + async
@@ -146,6 +181,15 @@ pub async fn load_plugin(
         |s| s,
     )
     .context("link mqtt host")?;
+    // ABI 1.4.0 (M5a follow-up): `net::http` host import — outbound
+    // HTTP gated by manifest `capabilities.net.outbound` URL-prefix
+    // allow-list. Strictly additive; 1.3.0 plugins that import
+    // bus/log/mqtt only continue to load.
+    crate::component::iot::plugin_host::net::add_to_linker::<_, HasSelf<PluginState>>(
+        &mut linker,
+        |s| s,
+    )
+    .context("link net host")?;
     // ABI 1.3.0 (M5a W1) removed the `registry::upsert-device`
     // capability — no `registry::add_to_linker` to call here. The
     // PluginState `registry` channel field remains for future per-
@@ -158,6 +202,7 @@ pub async fn load_plugin(
         audit: bindings.audit,
         mqtt: bindings.mqtt,
         registry: bindings.registry,
+        http: bindings.http,
         // `self_tx` is filled in by `spawn_plugin_task` after the
         // mpsc channel is created — we can't know it here because
         // load_plugin is the synchronous side of construction.
@@ -230,11 +275,30 @@ pub async fn run(cfg: Config) -> Result<()> {
         None
     };
 
+    // Build the shared outbound HTTP client (ABI 1.4.0). Per-call
+    // capability checks gate which plugins can reach which URL prefixes;
+    // the client itself is process-wide so a noisy plugin can't starve
+    // a quiet one of connection-pool slots beyond reqwest's defaults.
+    // No redirects (a 3xx is surfaced verbatim — plugins decide), no
+    // automatic decompression (plugins opt back in via headers if they
+    // care), 10 s default timeout per request.
+    let http = match build_http_client() {
+        Ok(c) => Some(c),
+        Err(e) => {
+            tracing::error!(
+                error = %format!("{e:#}"),
+                "outbound HTTP client init failed — net.http calls will return net.unconfigured"
+            );
+            None
+        }
+    };
+
     // Per-plugin supervisor tasks. Each one owns its restart loop, its
     // CrashTracker, and eventually its DLQ marker. The host binary's
     // role is just to spawn them and wait for ctrl-c.
     let bindings = HostBindings {
         mqtt,
+        http,
         ..HostBindings::default()
     };
     let mut supervisor_tasks = Vec::with_capacity(found.len());

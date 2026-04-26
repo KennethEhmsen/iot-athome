@@ -1,9 +1,9 @@
-//! Host-side bindings for the `iot:plugin-host@1.3.0` WIT world.
+//! Host-side bindings for the `iot:plugin-host@1.4.0` WIT world.
 //!
 //! `wasmtime::component::bindgen!` generates:
 //!  * A `Plugin` type wrapping an instantiated component.
-//!  * Host traits on the generated `bus::Host` + `log::Host` + `mqtt::Host` —
-//!    implemented below on [`PluginState`].
+//!  * Host traits on the generated `bus::Host` + `log::Host` +
+//!    `mqtt::Host` + `net::Host` — implemented below on [`PluginState`].
 //!  * `call_runtime_init` / `call_runtime_on_message` / `call_runtime_on_mqtt_message`
 //!    accessors.
 //!
@@ -16,6 +16,10 @@
 //!    `device.>` publishes; adapters drop the explicit upsert call.
 //!    Plugins built against 1.2.0 won't load — wasmtime errors at
 //!    instantiation when their unresolved import isn't satisfied.
+//!  * 1.4.0 — added the `net::http` host import. One-shot HTTP
+//!    outbound, capability-checked against the manifest's
+//!    `capabilities.net.outbound` URL-prefix allow-list. Strictly
+//!    additive: 1.3.0 plugins continue to load against a 1.4.0 host.
 
 #![allow(
     clippy::all,
@@ -64,6 +68,12 @@ pub struct PluginState {
     /// + future per-plugin admin RPCs. `None` in offline / unit-test
     /// setups.
     pub registry: Option<tonic::transport::Channel>,
+    /// Shared HTTP client for the ABI 1.4.0 `net::http` host import.
+    /// `reqwest::Client` is `Arc`-internal — cloning is cheap and the
+    /// connection pool is shared across plugins. `None` in unit-test
+    /// setups; capability check still enforces and the call degrades
+    /// to a `net.unconfigured` plugin error.
+    pub http: Option<reqwest::Client>,
     /// This plugin's own mailbox, used when registering with
     /// `MqttRouter` so inbound messages route back to us. Filled in by
     /// [`crate::runtime::spawn_plugin_task`] after the mpsc channel
@@ -301,6 +311,110 @@ impl crate::component::iot::plugin_host::mqtt::Host for PluginState {
                 code: "mqtt.publish_failed".into(),
                 message: format!("{e:#}"),
             })
+    }
+}
+
+// ---------- net host impl (ABI 1.4.0) ----------
+//
+// One-shot HTTP outbound. Capability-checked against the manifest's
+// `capabilities.net.outbound` URL-prefix allow-list. Non-2xx
+// responses come back as `Ok(http-response)` — only transport /
+// capability / parse failures surface as `PluginError`, so the plugin
+// owns the policy on retries vs. fatal status codes.
+//
+// The shared `reqwest::Client` lives in `PluginState::http`, populated
+// from `HostBindings::http`. When unset (most unit tests), the call
+// degrades to `Err(net.unconfigured)` after the capability check
+// passes — the security boundary still enforces, the I/O is just
+// elided.
+
+impl crate::component::iot::plugin_host::net::Host for PluginState {
+    #[tracing::instrument(
+        name = "host_call",
+        skip(self, req),
+        fields(
+            plugin = %self.id,
+            capability = "net.outbound",
+            method = %req.method,
+            url = %req.url,
+            req_bytes = req.body.as_ref().map_or(0, std::vec::Vec::len),
+        ),
+    )]
+    async fn http(
+        &mut self,
+        req: crate::component::iot::plugin_host::net::HttpRequest,
+    ) -> Result<crate::component::iot::plugin_host::net::HttpResponse, PluginError> {
+        if let Err(d) = self.capabilities.check_net_outbound(&req.url) {
+            warn!(reason = d.code, "capability.denied");
+            record_denied(
+                self.audit.clone(),
+                self.id.clone(),
+                req.url.clone(),
+                d.code.to_string(),
+            )
+            .await;
+            return Err(PluginError {
+                code: d.code.to_string(),
+                message: d.message,
+            });
+        }
+
+        let Some(client) = self.http.clone() else {
+            debug!("net.http (no http client configured — degrading to net.unconfigured)");
+            return Err(PluginError {
+                code: "net.unconfigured".into(),
+                message: "host has no outbound HTTP client wired".into(),
+            });
+        };
+
+        let method =
+            reqwest::Method::from_bytes(req.method.as_bytes()).map_err(|e| PluginError {
+                code: "net.bad_method".into(),
+                message: format!("invalid HTTP method `{}`: {e}", req.method),
+            })?;
+
+        let mut builder = client.request(method, &req.url);
+        for (name, value) in &req.headers {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+        if let Some(body) = req.body {
+            builder = builder.body(body);
+        }
+
+        let resp = match builder.send().await {
+            Ok(r) => r,
+            Err(e) if e.is_timeout() => {
+                return Err(PluginError {
+                    code: "net.timeout".into(),
+                    message: format!("{e:#}"),
+                });
+            }
+            Err(e) => {
+                return Err(PluginError {
+                    code: "net.transport_failed".into(),
+                    message: format!("{e:#}"),
+                });
+            }
+        };
+
+        let status = resp.status().as_u16();
+        // Preserve repeated header names (Set-Cookie, Link, …) — a
+        // HashMap<String, String> would collapse them.
+        let headers: Vec<(String, String)> = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.as_str().to_owned(), v.to_str().unwrap_or("").to_owned()))
+            .collect();
+        let body = resp.bytes().await.map_err(|e| PluginError {
+            code: "net.body_read_failed".into(),
+            message: format!("{e:#}"),
+        })?;
+        debug!(status, resp_bytes = body.len(), "net.http");
+        Ok(crate::component::iot::plugin_host::net::HttpResponse {
+            status,
+            headers,
+            body: body.to_vec(),
+        })
     }
 }
 

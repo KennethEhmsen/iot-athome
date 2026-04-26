@@ -1,0 +1,31 @@
+[package]
+name = "weather-poller"
+version = "0.1.0"
+edition = "2021"
+description = "IoT-AtHome — WASM plugin scaffold demonstrating the ABI 1.4.0 net::http host capability against api.open-meteo.com."
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+# Built from this dir, target pinned in .cargo/config.toml to wasm32-wasip2.
+# The empty `[workspace]` table below makes this package its own workspace
+# root, so cargo doesn't try to attach it to the host-side workspace
+# above (which excludes it). The other plugins rely on the same exclusion
+# but predate this annotation; new scaffolds should use it.
+
+[workspace]
+
+[dependencies]
+iot-plugin-sdk-rust = { path = "../../crates/iot-plugin-sdk-rust" }
+
+# JSON parsing of the Open-Meteo response. The full bus.publish
+# integration (prost-encoded EntityState on
+# `device.weather.<location>.<entity>.state`) lands when the plugin
+# graduates from scaffold to a real integration. For now this scaffold
+# proves the host's capability check + reqwest plumbing end-to-end.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[package.metadata.component]
+package = "iot:weather-poller"

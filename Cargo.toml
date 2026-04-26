@@ -35,6 +35,11 @@ exclude = [
   # as z2m: host MQTT capability + bus.publish + bus-watcher auto-
   # register. ABI 1.3.0.
   "plugins/sdr433-adapter",
+  # weather-poller scaffold — first plugin to exercise the ABI 1.4.0
+  # net::http host capability against Open-Meteo. Same exclusion
+  # rationale as the other WASM plugins (wasm32-wasip2 cdylib,
+  # standalone build from the plugin dir).
+  "plugins/weather-poller",
 ]
 
 [workspace.package]

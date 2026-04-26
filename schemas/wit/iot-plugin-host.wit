@@ -15,6 +15,14 @@
 //   1.2.0 — registry host interface (transitional per ADR-0013);
 //           deprecated in M4 once M3 W1.2's registry bus-watcher
 //           shipped.
+//   1.4.0 — net host interface (`net::http`). One-shot HTTP
+//           outbound, capability-checked against the manifest's
+//           `capabilities.net.outbound` URL-prefix allow-list.
+//           Unblocks the M5a-gap class of integrations
+//           (weather/tariff/calendar/notifier/HTTP-API devices)
+//           that need to *call out* rather than receive bus or
+//           MQTT input. Strictly additive: 1.3.0 plugins still
+//           load under a 1.4.0 host.
 //
 // Breaking-change major bumps:
 //   1.3.0 — removes the `registry` host interface. M3 W1.2's
@@ -30,7 +38,7 @@
 // previous for a major cycle. 1.2.0 plugins targeting `import
 // registry` are NOT loadable under a 1.3.0 host — there's no
 // minor-version compatibility story for capability removal.
-package iot:plugin-host@1.3.0;
+package iot:plugin-host@1.4.0;
 
 interface types {
     /// Dotted-namespace stable error code (see ADR-0008).
@@ -107,6 +115,52 @@ interface mqtt {
     ) -> result<_, plugin-error>;
 }
 
+/// HTTP outbound (added in 1.4.0). Capability-checked against
+/// `capabilities.net.outbound` (URL-prefix matching, on the wire form
+/// of the request URL). Plugins targeting this capability declare the
+/// prefixes they intend to call; anything outside the manifest's
+/// allow-list returns `capability.denied` from `http(...)`.
+///
+/// One-shot request/response — no streaming, no WebSocket. Future
+/// minor bumps may add streaming variants. The host enforces a
+/// default 10-second timeout, disables automatic redirects (a 3xx is
+/// surfaced verbatim — the plugin decides whether to retarget; the
+/// next URL must also be allow-listed), and disables compression
+/// negotiation (plugins can opt back in with explicit headers).
+///
+/// Non-2xx responses are returned as `Ok(http-response)` — only
+/// transport / capability / parse failures surface as `plugin-error`.
+/// Lets plugins decide whether a 404 or a 429 is fatal.
+interface net {
+    use types.{plugin-error};
+
+    record http-request {
+        /// Uppercase HTTP verb, e.g. `"GET"`, `"POST"`, `"PUT"`. The
+        /// host parses with `reqwest::Method::from_bytes`; unknown
+        /// verbs return `net.bad_method`.
+        method: string,
+        /// Absolute request URL. Must start with one of the prefixes
+        /// declared in `capabilities.net.outbound` or the host
+        /// returns `capability.denied`.
+        url: string,
+        /// Headers as ordered (name, value) pairs. Repeated names are
+        /// preserved (Set-Cookie etc.).
+        headers: list<tuple<string, string>>,
+        /// Optional request body. Empty list and absent are
+        /// equivalent on the wire; absent maps to "no Content-Length"
+        /// when the verb permits it.
+        body: option<list<u8>>,
+    }
+
+    record http-response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    http: func(req: http-request) -> result<http-response, plugin-error>;
+}
+
 /// Exports a plugin must implement.
 ///
 /// Grouping under an interface (rather than leaving as world-level free
@@ -143,5 +197,6 @@ world plugin {
     import bus;
     import log;
     import mqtt;
+    import net;
     export runtime;
 }
