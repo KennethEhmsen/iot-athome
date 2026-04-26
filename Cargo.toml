@@ -35,6 +35,12 @@ exclude = [
   # as z2m: host MQTT capability + bus.publish + bus-watcher auto-
   # register. ABI 1.3.0.
   "plugins/sdr433-adapter",
+  # Matter (CSA) bridge — third WASM plugin. Scaffold; translator
+  # lands in Phase 3 of the Matter integration arc (ADR-0014,
+  # docs/MATTER-PLAN.md). Same sidecar+plugin pattern as z2m;
+  # python-matter-server upstream + a small WS→MQTT shim publish on
+  # `matter/nodes/+/+/+/+/+`, this plugin subscribes there.
+  "plugins/matter-bridge",
 ]
 
 [workspace.package]

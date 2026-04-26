@@ -1,0 +1,56 @@
+# IoT-AtHome Matter (CSA) bridge — third WASM plugin (scaffold).
+#
+# Architecture: ADR-0014 picks python-matter-server as the controller
+# sidecar. A small Python WS→MQTT shim republishes events on the
+# `matter/nodes/<node_id>/endpoints/<endpoint_id>/clusters/<cluster_id>/<attribute>`
+# topic shape; this plugin subscribes there, translates each event into
+# canonical iot.device.v1.EntityState, and publishes on
+# `device.matter.<node_id>-<endpoint_id>.<entity>.state`.
+#
+# Phase 1 (compose stack + OTBR firmware) and Phase 2 (this plugin
+# scaffold) ship together; the translator (Phase 3) covers OnOff,
+# LevelControl, TemperatureMeasurement, OccupancySensing, BooleanState
+# clusters. See docs/MATTER-PLAN.md for the phased arc.
+#
+# The iot-registry bus-watcher (M3 W1.2) auto-registers each
+# `(matter, <node_id>-<endpoint_id>)` pair on first publish — no
+# explicit registry capability needed (gone in ABI 1.3.0 / M5a W1).
+
+schema_version: 1
+id: matter-bridge
+name: Matter (CSA) Bridge
+version: 0.0.0-scaffold
+description: >
+  Bridges Matter controller events (via python-matter-server's
+  WS→MQTT shim) into canonical EntityState bus events. Scaffold
+  — translator lands in Phase 3 of the Matter integration arc.
+authors: ["IoT-AtHome"]
+license: "Apache-2.0 OR MIT"
+
+runtime: wasm-component
+abi:
+  world: iot:plugin-host
+  version: 1.3.0
+entrypoint: plugin.wasm
+
+capabilities:
+  mqtt:
+    subscribe:
+      # Matter shim's canonical topic shape — see ADR-0014.
+      - "matter/nodes/+/+/+/+/+"
+  bus:
+    publish:
+      - "device.matter.>"
+
+resources:
+  memory_mb_max: 64
+  cpu_pct_max: 10
+  fuel_max: 10000000
+
+signatures:
+  - mechanism: cosign-keyless
+    rekor_entry: "DEV-UNSIGNED"
+    identity: "dev@localhost"
+    issuer: "dev"
+
+sbom: sbom.cdx.json

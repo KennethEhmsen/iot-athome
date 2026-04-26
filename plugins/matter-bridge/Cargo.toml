@@ -1,0 +1,29 @@
+[package]
+name = "matter-bridge"
+version = "0.0.0-scaffold"
+edition = "2021"
+description = "IoT-AtHome — WASM plugin that bridges Matter (CSA) controller events into canonical EntityState bus messages. Scaffold; translator lands in Phase 3 of MATTER-PLAN."
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+# Built from this dir, target pinned in .cargo/config.toml to wasm32-wasip2.
+# Not a workspace member — see root Cargo.toml `exclude` list.
+
+[dependencies]
+iot-plugin-sdk-rust = { path = "../../crates/iot-plugin-sdk-rust" }
+# iot-proto-core for canonical iot.device.v1.EntityState. Phase 3
+# uses this; Phase 2 scaffold doesn't construct payloads yet.
+iot-proto-core = { path = "../../crates/iot-proto-core" }
+
+# Phase 3 deps (kept here to flag the intent; the scaffold doesn't
+# use them, but it's clearer to land them with the crate than chase
+# them down in three commits).
+prost = { version = "0.13", default-features = false, features = ["derive"] }
+prost-types = { version = "0.13", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[package.metadata.component]
+package = "iot:matter-bridge"
