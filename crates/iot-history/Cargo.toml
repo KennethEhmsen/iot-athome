@@ -25,3 +25,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+# Live-Postgres / Timescale round-trip tests spin a container per run.
+# Skipped when no Docker/Podman runtime is available (env-var + socket
+# probe, same pattern as iot-bus/tests/roundtrip.rs).
+testcontainers.workspace = true
