@@ -25,3 +25,8 @@ tracing.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+# Live-Postgres + Timescale integration tests
+# (`tests/postgres_roundtrip.rs`, `tests/plain_postgres_compat.rs`).
+# Same pattern as iot-bus / iot-plugin-host — `GenericImage` + skip
+# when no container runtime is on PATH.
+testcontainers.workspace = true
