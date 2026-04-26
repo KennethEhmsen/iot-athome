@@ -15,6 +15,11 @@ ActivLink = "ActivLink"
 # backticks or prose) still trips the bare-word match unless it's
 # allowed standalone.
 Activ = "Activ"
+# "overrideable" — the misspelling itself, quoted verbatim in the
+# Justfile's lint-fast comment + the M5a retrospective when
+# narrating the typos round-trip during tag prep. Same shape as
+# the `Activ` allowance: discussing the typo literally in prose.
+overrideable = "overrideable"
 
 [default.extend-words]
 # Eclipse Mosquitto — MQTT broker product name. typos' default

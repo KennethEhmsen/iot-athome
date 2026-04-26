@@ -14,8 +14,16 @@ default:
     @just --list --unsorted
 
 # Run every check CI runs, locally, in the right order. Use this before
-# `git push` to avoid round-tripping through CI.
+# `git push` on **source changes** to avoid round-tripping through CI.
 ci-local: ci-preflight ci-build ci-test ci-audit
+
+# Fast pre-push subset for **docs-only** changes (retros, READMEs, ADRs,
+# this Justfile). Just typos + fmt-check — ~5s vs. the multi-minute
+# `ci-local` run. Catches the M5a-tag-prep class of avoidable round
+# trips (`Activ` and `overrideable` slipping into committed prose;
+# typos triggers preflight in CI which then takes the whole pipeline
+# down on a one-character fix).
+lint-fast: lint-typos lint-fmt
 
 ci-preflight: lint-typos lint-fmt lint-schemas lint-rust lint-panel
 
@@ -28,6 +36,9 @@ ci-test:
 ci-audit:
     cargo deny check
 
+# Prereq: `cargo install typos-cli` (CI uses the crate-ci/typos GitHub
+# action which fetches its own binary; the local check needs the
+# cargo-installed CLI). Allow-list lives in `_typos.toml` at repo root.
 lint-typos:
     typos .
 
