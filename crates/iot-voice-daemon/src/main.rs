@@ -31,9 +31,9 @@ use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand};
 use iot_bus::{Bus, Config as BusConfig};
 use iot_voice::{
-    EnergyVadWakeDetector, IntentParser, Pipeline, PiperBinarySynthesizer, RuleIntentParser,
-    SpeechRecognizer, StubAudioSource, StubSpeechRecognizer, StubWakeDetector, Synthesizer,
-    WakeDetector,
+    EnergyVadWakeDetector, IntentParser, LogIntentSink, Pipeline, PiperBinarySynthesizer,
+    RuleIntentParser, SpeechRecognizer, StubAudioSource, StubSpeechRecognizer, StubWakeDetector,
+    Synthesizer, WakeDetector,
 };
 use tracing::{info, warn};
 
@@ -100,6 +100,15 @@ enum Command {
         /// instructions.
         #[arg(long, env = "IOT_VOICE_WAKE_MODEL")]
         wake_model: Option<std::path::PathBuf>,
+        /// Skip the NATS bus handshake; pipe transcribed
+        /// intents to `tracing::info!` instead of publishing.
+        /// Use this to smoke-test mic + wake + STT without
+        /// having to bring up the dev stack first. Every
+        /// recognised intent shows in the daemon's stdout.
+        /// Unrecognised transcriptions still log at info!
+        /// level so the operator sees what whisper heard.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Synthesise `<text>` to a WAV file via the piper TTS
     /// binary, write to stdout (or `--output <path>`).
@@ -147,6 +156,20 @@ async fn main() -> Result<()> {
         return cmd_say(text, tts_model, output).await;
     }
 
+    // `listen --dry-run` is also bus-free — same reasoning:
+    // smoke-test mic + wake + STT without the dev stack.
+    // Match before the Bus::connect so a missing broker
+    // doesn't refuse the dry-run.
+    if let Command::Listen {
+        use_mic,
+        stt_model,
+        wake_model,
+        dry_run: true,
+    } = &cli.command
+    {
+        return cmd_listen_dry_run(*use_mic, stt_model.clone(), wake_model.clone()).await;
+    }
+
     let cfg = BusConfig::from_env(cli.publisher.clone());
     let bus = Bus::connect(cfg)
         .await
@@ -158,8 +181,11 @@ async fn main() -> Result<()> {
             use_mic,
             stt_model,
             wake_model,
+            dry_run: false,
         } => cmd_listen(bus, use_mic, stt_model, wake_model).await,
-        Command::Say { .. } => unreachable!("handled before bus connect"),
+        Command::Listen { dry_run: true, .. } | Command::Say { .. } => {
+            unreachable!("handled before bus connect")
+        }
     }
 }
 
@@ -295,8 +321,46 @@ async fn cmd_listen(
     stt_model: Option<std::path::PathBuf>,
     wake_model: Option<std::path::PathBuf>,
 ) -> Result<()> {
+    let sink: Arc<dyn iot_voice::IntentSink> = Arc::new(NatsIntentSink::new(bus));
+    run_listen_inner(use_mic, stt_model, wake_model, sink).await
+}
+
+/// `listen --dry-run` — same pipeline shape as `cmd_listen` but
+/// with [`LogIntentSink`] replacing the NATS publish path. No
+/// bus connection; intents log to `tracing::info!` so the
+/// operator can smoke-test the mic + wake + STT chain without
+/// the dev stack running.
+///
+/// Useful when:
+///
+/// * The mic / model setup is being validated before the
+///   broker is configured.
+/// * The operator wants to see what whisper actually heard
+///   without firing real automation rules.
+/// * Pen-test / debugging — log-only output keeps the
+///   `command.intent.>` subject quiet.
+async fn cmd_listen_dry_run(
+    use_mic: bool,
+    stt_model: Option<std::path::PathBuf>,
+    wake_model: Option<std::path::PathBuf>,
+) -> Result<()> {
+    info!("iot-voice listen --dry-run: bus skipped; intents log-only");
+    let sink: Arc<dyn iot_voice::IntentSink> = Arc::new(LogIntentSink);
+    run_listen_inner(use_mic, stt_model, wake_model, sink).await
+}
+
+/// Shared assembly of the listen pipeline. Both the bus-backed
+/// (`cmd_listen`) and the dry-run (`cmd_listen_dry_run`) callers
+/// reach this with their own `IntentSink`; the rest of the
+/// pipeline (wake, STT, parser, pre-flight validation) is
+/// identical.
+async fn run_listen_inner(
+    use_mic: bool,
+    stt_model: Option<std::path::PathBuf>,
+    wake_model: Option<std::path::PathBuf>,
+    sink: Arc<dyn iot_voice::IntentSink>,
+) -> Result<()> {
     let parser = RuleIntentParser::new();
-    let sink = NatsIntentSink::new(bus);
 
     if stt_model.is_some() && !use_mic {
         anyhow::bail!(
@@ -321,7 +385,7 @@ async fn cmd_listen(
              or rebuild with `--features mic` and rerun with `--use-mic`."
         );
         let audio = StubAudioSource::new(Vec::new());
-        let mut pipeline = Pipeline::new(audio, wake, stt, parser, Arc::new(sink));
+        let mut pipeline = Pipeline::new(audio, wake, stt, parser, sink);
         pipeline.run().await.context("pipeline run")?;
         info!("pipeline ended (stub source exhausted)");
         Ok(())
@@ -414,12 +478,12 @@ async fn run_with_mic(
     wake: Box<dyn WakeDetector>,
     stt: Box<dyn SpeechRecognizer>,
     parser: RuleIntentParser,
-    sink: NatsIntentSink,
+    sink: Arc<dyn iot_voice::IntentSink>,
 ) -> Result<()> {
     use iot_voice::CpalAudioSource;
     info!("starting cpal audio capture; speak after startup");
     let audio = CpalAudioSource::start().context("open default input device")?;
-    let mut pipeline = Pipeline::new(audio, wake, stt, parser, Arc::new(sink));
+    let mut pipeline = Pipeline::new(audio, wake, stt, parser, sink);
     pipeline.run().await.context("pipeline run")?;
     info!("pipeline ended");
     Ok(())
@@ -433,7 +497,7 @@ async fn run_with_mic(
     _wake: Box<dyn WakeDetector>,
     _stt: Box<dyn SpeechRecognizer>,
     _parser: RuleIntentParser,
-    _sink: NatsIntentSink,
+    _sink: Arc<dyn iot_voice::IntentSink>,
 ) -> Result<()> {
     anyhow::bail!(
         "binary built without --features mic; \
@@ -480,6 +544,16 @@ mod tests {
         assert_eq!(m.subcommand_name(), Some("listen"));
         let listen_m = m.subcommand_matches("listen").expect("listen subcommand");
         assert!(listen_m.get_flag("use_mic"));
+    }
+
+    #[test]
+    fn cli_parses_listen_with_dry_run() {
+        let m = Cli::command()
+            .try_get_matches_from(vec!["iot-voice", "listen", "--use-mic", "--dry-run"])
+            .expect("parse `listen --use-mic --dry-run`");
+        let listen_m = m.subcommand_matches("listen").expect("listen subcommand");
+        assert!(listen_m.get_flag("use_mic"));
+        assert!(listen_m.get_flag("dry_run"));
     }
 
     #[test]
