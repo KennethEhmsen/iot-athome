@@ -22,6 +22,12 @@ default = []
 # message when this feature isn't compiled in, instead of falling
 # back to the stub silently.
 mic = ["iot-voice/cpal"]
+# Activate `iot-voice/whisper` to enable real STT inference via
+# whisper.cpp. Requires CMake + Clang on PATH (see the iot-voice
+# crate's `[features]` section). The daemon's `--stt-model
+# <path>` flag is refused at runtime when this feature isn't
+# compiled in.
+stt-whisper = ["iot-voice/whisper"]
 
 [dependencies]
 # Library half: pure pipeline + traits + stub impls.

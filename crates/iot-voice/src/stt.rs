@@ -53,6 +53,17 @@ pub trait SpeechRecognizer: Send {
     async fn transcribe(&mut self, frames: &[AudioFrame]) -> Result<String, SttError>;
 }
 
+/// Blanket `Box<dyn>` impl so the daemon can pick a concrete
+/// recogniser at runtime (stub vs Whisper) without needing the
+/// `Pipeline`'s generic `S` parameter to vary across run-modes.
+/// `async_trait`'s macro doesn't auto-generate this.
+#[async_trait]
+impl SpeechRecognizer for Box<dyn SpeechRecognizer> {
+    async fn transcribe(&mut self, frames: &[AudioFrame]) -> Result<String, SttError> {
+        (**self).transcribe(frames).await
+    }
+}
+
 /// Test-grade recogniser that returns canned phrases keyed on a
 /// hash of the audio window's first sample byte.
 ///

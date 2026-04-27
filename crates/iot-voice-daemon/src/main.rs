@@ -31,8 +31,8 @@ use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand};
 use iot_bus::{Bus, Config as BusConfig};
 use iot_voice::{
-    IntentParser, Pipeline, RuleIntentParser, StubAudioSource, StubSpeechRecognizer,
-    StubWakeDetector,
+    IntentParser, Pipeline, RuleIntentParser, SpeechRecognizer, StubAudioSource,
+    StubSpeechRecognizer, StubWakeDetector,
 };
 use tracing::{info, warn};
 
@@ -82,6 +82,15 @@ enum Command {
         /// with `--features mic`.
         #[arg(long)]
         use_mic: bool,
+        /// Path to a ggml-format whisper.cpp model file. When
+        /// set, real STT replaces the stub recogniser. Refused
+        /// at runtime if the binary wasn't built with
+        /// `--features stt-whisper`. Common path is
+        /// `~/.iot-athome/models/ggml-base.en.bin` — see
+        /// `iot-voice/src/whisper.rs` module docs for download
+        /// instructions.
+        #[arg(long, env = "IOT_VOICE_STT_MODEL")]
+        stt_model: Option<std::path::PathBuf>,
     },
 }
 
@@ -101,7 +110,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Send { text } => cmd_send(&bus, &text).await,
-        Command::Listen { use_mic } => cmd_listen(bus, use_mic).await,
+        Command::Listen { use_mic, stt_model } => cmd_listen(bus, use_mic, stt_model).await,
     }
 }
 
@@ -136,21 +145,31 @@ async fn cmd_send(bus: &Bus, text: &str) -> Result<()> {
 
 /// `listen` — full pipeline.
 ///
-/// Two audio paths:
+/// Audio + STT are composed at runtime based on flags + features:
 ///
-/// * `--use-mic` (requires the `mic` cargo feature, which pulls
-///   in `iot-voice/cpal`): real default-input capture. Loops
-///   forever, dropping frames into the wake detector.
-/// * default: `StubAudioSource` yielding 0 frames. Pipeline
-///   returns immediately. Useful for "did the bus connect?".
+/// * `--use-mic` (requires `--features mic`): real default-input
+///   capture via cpal. Loops forever, dropping frames into the
+///   pipeline.
+/// * `--stt-model <path>` (requires `--features stt-whisper`):
+///   real Whisper STT loaded from the ggml-format model file.
+///   Without this flag, the stub recogniser substitutes (returns
+///   a placeholder phrase that the closed-domain parser rejects).
 ///
-/// Wake / STT / TTS stages stay stub today regardless of audio
-/// path — real impls land in M5b W4b/W4c.
-async fn cmd_listen(bus: Bus, use_mic: bool) -> Result<()> {
+/// `--stt-model` without `--use-mic` is refused — a stub audio
+/// source produces no frames, so loading a 140 MB model just to
+/// transcribe nothing is operator-error and we say so.
+async fn cmd_listen(bus: Bus, use_mic: bool, stt_model: Option<std::path::PathBuf>) -> Result<()> {
     let wake = StubWakeDetector::default();
-    let stt = StubSpeechRecognizer::new("(stub stt has no audio to transcribe)");
     let parser = RuleIntentParser::new();
     let sink = NatsIntentSink::new(bus);
+
+    if stt_model.is_some() && !use_mic {
+        anyhow::bail!(
+            "--stt-model requires --use-mic; without real audio there's nothing to transcribe"
+        );
+    }
+
+    let stt = build_stt(stt_model.as_deref())?;
 
     if use_mic {
         run_with_mic(wake, stt, parser, sink).await
@@ -168,10 +187,44 @@ async fn cmd_listen(bus: Bus, use_mic: bool) -> Result<()> {
     }
 }
 
+/// Build the recogniser, picking Whisper over the stub when
+/// `model_path` is set + the `stt-whisper` feature is on.
+#[cfg(feature = "stt-whisper")]
+fn build_stt(model_path: Option<&std::path::Path>) -> Result<Box<dyn SpeechRecognizer>> {
+    if let Some(path) = model_path {
+        info!(model = %path.display(), "loading Whisper STT");
+        let r = iot_voice::WhisperRecognizer::load(path)
+            .map_err(|e| anyhow::anyhow!("load whisper model: {e}"))?;
+        Ok(Box::new(r))
+    } else {
+        warn!(
+            "--stt-model not set; STT will return placeholder text \
+             that no rule will match. Pass --stt-model <path> for real transcription."
+        );
+        Ok(Box::new(StubSpeechRecognizer::new(
+            "(stub stt — pass --stt-model for real transcription)",
+        )))
+    }
+}
+
+#[cfg(not(feature = "stt-whisper"))]
+fn build_stt(model_path: Option<&std::path::Path>) -> Result<Box<dyn SpeechRecognizer>> {
+    if model_path.is_some() {
+        anyhow::bail!(
+            "binary built without --features stt-whisper; \
+             rebuild iot-voice-daemon with `cargo build -p iot-voice-daemon --features stt-whisper` \
+             to enable --stt-model. Note: requires CMake + Clang on PATH."
+        );
+    }
+    Ok(Box::new(StubSpeechRecognizer::new(
+        "(stub stt has no audio to transcribe)",
+    )))
+}
+
 #[cfg(feature = "mic")]
 async fn run_with_mic(
     wake: StubWakeDetector,
-    stt: StubSpeechRecognizer,
+    stt: Box<dyn SpeechRecognizer>,
     parser: RuleIntentParser,
     sink: NatsIntentSink,
 ) -> Result<()> {
@@ -190,7 +243,7 @@ async fn run_with_mic(
 #[allow(clippy::unused_async)]
 async fn run_with_mic(
     _wake: StubWakeDetector,
-    _stt: StubSpeechRecognizer,
+    _stt: Box<dyn SpeechRecognizer>,
     _parser: RuleIntentParser,
     _sink: NatsIntentSink,
 ) -> Result<()> {
@@ -239,6 +292,27 @@ mod tests {
         assert_eq!(m.subcommand_name(), Some("listen"));
         let listen_m = m.subcommand_matches("listen").expect("listen subcommand");
         assert!(listen_m.get_flag("use_mic"));
+    }
+
+    #[test]
+    fn cli_parses_listen_with_stt_model() {
+        let m = Cli::command()
+            .try_get_matches_from(vec![
+                "iot-voice",
+                "listen",
+                "--use-mic",
+                "--stt-model",
+                "/tmp/ggml-base.en.bin",
+            ])
+            .expect("parse `listen --use-mic --stt-model …`");
+        let listen_m = m.subcommand_matches("listen").expect("listen subcommand");
+        assert!(listen_m.get_flag("use_mic"));
+        assert_eq!(
+            listen_m
+                .get_one::<std::path::PathBuf>("stt_model")
+                .map(std::path::PathBuf::as_path),
+            Some(std::path::Path::new("/tmp/ggml-base.en.bin")),
+        );
     }
 
     #[test]

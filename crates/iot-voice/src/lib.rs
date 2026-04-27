@@ -51,6 +51,8 @@ pub mod pipeline;
 pub mod stt;
 pub mod synth;
 pub mod wake;
+#[cfg(feature = "whisper")]
+pub mod whisper;
 
 pub use audio::{AudioFrame, AudioSource, AudioSourceError, StubAudioSource};
 #[cfg(feature = "cpal")]
@@ -62,6 +64,8 @@ pub use pipeline::{Pipeline, PipelineError, PipelineMetrics};
 pub use stt::{SpeechRecognizer, SttError, StubSpeechRecognizer};
 pub use synth::{StubSynthesizer, SynthError, Synthesizer};
 pub use wake::{StubWakeDetector, Wake, WakeDetector, WakeError};
+#[cfg(feature = "whisper")]
+pub use whisper::WhisperRecognizer;
 
 /// Sample rate the entire pipeline operates at — 16 kHz mono `f32`.
 ///

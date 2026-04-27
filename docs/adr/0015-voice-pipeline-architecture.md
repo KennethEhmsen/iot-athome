@@ -104,3 +104,36 @@ If any stage exceeds budget consistently, the daemon emits a `voice.latency.exce
 * M6: satellite firmware lands → AudioSource implementations expand.
 * M5b W3: STT model size vs. Pi 5 thermal sustains real bench numbers.
 * Voice-on-mobile becomes a user need → Option B re-enters consideration as a *secondary* path, not the primary.
+
+## Implementation log
+
+This ADR's decisions land incrementally. Each row points at the
+commit that implemented the corresponding piece.
+
+| Slice | What | Commit |
+|-------|------|--------|
+| W2 | Library scaffold (traits + Stub impls) | `5411d96` |
+| W3 | Daemon binary + NATS sink | `e5e4396` |
+| W5 | Rule engine consumes `command.intent.>` | `96cb28e` |
+| W4a | Real audio capture via `cpal` (feature: `mic`) | `77491b1` |
+| W4c | Real STT via `whisper-rs` (feature: `stt-whisper`) | this commit |
+| W4b | Real wake-word detection | open |
+| W4d | Real TTS via `piper` | open |
+
+### Build-prereq ladder
+
+Default builds stay pure-Rust (no native deps). Each real-impl
+feature adds one prereq class:
+
+| Feature | Crate | Build prereqs |
+|---------|-------|---------------|
+| (default) | — | rustup toolchain |
+| `mic` (cpal) | iot-voice | system audio libs (alsa-dev on Linux; built-in on Win/macOS) |
+| `stt-whisper` | iot-voice | **CMake + Clang** on PATH (whisper.cpp build script) |
+| `tts-piper` (future) | iot-voice | CMake + Clang (piper build script — same toolchain as whisper) |
+
+Operators on Windows install the toolchain once with
+`choco install cmake llvm`; macOS via `brew install cmake`;
+Debian / Ubuntu via `apt install cmake clang`. The first compile
+of whisper.cpp takes ~3 min; subsequent incremental builds are
+fast.

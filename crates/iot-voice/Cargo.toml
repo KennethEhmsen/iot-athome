@@ -23,6 +23,14 @@ default = []
 # Enable with `cargo build -p iot-voice --features cpal` or the
 # `iot-voice-daemon` crate's matching `mic` feature.
 cpal = ["dep:cpal"]
+# Real speech-to-text via `whisper-rs` (wraps whisper.cpp).
+# Build prereqs: CMake + Clang on PATH. On Windows:
+# `choco install cmake llvm`; macOS / Linux usually have them
+# already. First build is slow (~3 minutes on a Pi 5; the
+# whisper.cpp C++ source compiles each time the rebuild dirties).
+# Cargo's incremental build means subsequent compiles are fast.
+# Behind a feature so default builds + ci-local stay CMake-free.
+whisper = ["dep:whisper-rs"]
 
 [dependencies]
 # Pipeline outputs ride the existing NATS bus; the binary path
@@ -45,6 +53,13 @@ chrono = { workspace = true, features = ["serde"] }
 # `cpal` feature is on, so default workspace `cargo build` stays
 # pure-Rust + drag-free for the rule-engine/registry/etc. crates.
 cpal = { version = "0.15", optional = true }
+# Optional. See `[features].whisper` above. Wraps whisper.cpp
+# via cmake + bindgen. NOT pulled in on default builds; opt-in
+# via `--features whisper` or the daemon's `--features stt-whisper`.
+# 0.13 pinned because 0.14+ requires bindgen 0.70 which bumps
+# clang-sys requirements; revisit when the workspace clang-sys
+# transitively bumps anyway.
+whisper-rs = { version = "0.13", default-features = false, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
