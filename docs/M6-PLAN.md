@@ -184,22 +184,36 @@ W3 deliverables status:
 
 ### W4 — Pen test + final tag
 
+- [x] **Statement of Work template** — `docs/security/pentest-sow.md`
+  ✅ Shipped W4 prep. Pre-fill ready for the partner contract;
+  partner-specific terms (price, schedule, named consultants)
+  plug into § 9.
+- [x] **Partner candidate matrix** — `docs/security/pentest-partners.md`
+  ✅ Shipped W4 prep. Six-axis scoring against three named
+  candidates (Trail of Bits, NCC Group, Cure53) plus open-pool
+  alternatives. Recommendation: NCC Group for the balanced
+  axis-weight fit; Trail of Bits as technical-depth backup;
+  Cure53 if scope tightens to S1 + S2 only.
+- [x] **Pre-pen-test self-audit checklist** —
+  `docs/security/pre-pentest-checklist.md` ✅ Shipped W4 prep.
+  10 sections covering code health, dep health, static
+  analysis, dynamic surface, plugin install, bus + auth,
+  audit log, CI integrity, runtime hardening, doc completeness.
+  Maintainer signs off before sending the partner SOW.
+- [x] **TUF metadata root rotation rehearsal** —
+  `docs/security/tuf-rotation.md` ✅ Shipped W4 prep. Paper
+  exercise; live TUF ships post-M6 with the plugin marketplace.
+  Documents routine + incident rotation, disaster scenarios,
+  test schedule.
 - [ ] **External pen test partner engagement.** Two-week scoped
-  engagement; SOW covers the gateway HTTP/WS surface, the panel
-  PWA, the plugin-install signature path, the bus subject
-  authorisation. Candidate partners (chosen at W4 start):
-  * Trail of Bits (Rust + supply-chain heritage)
-  * NCC Group (consumer-IoT track record)
-  * Cure53 (web-PWA + auth specialty)
+  engagement against the SOW above. Pending: RFQ to candidates,
+  quote comparison, signature, kickoff.
 - [ ] **Findings remediation.** Every High / Medium finding
   becomes a tracked issue with an owner + a milestone. Lows go
   to a follow-up triage pass.
 - [ ] **Reproducibility rehearsal.** Two key-holders run the
   release ceremony from independent boxes; signatures match.
   Rekor entries cross-verify.
-- [ ] **TUF metadata root rotation rehearsal** — paper exercise,
-  not live. `docs/security/tuf-rotation.md` walks through the
-  process so the next rotation doesn't surprise anyone.
 - [ ] `v1.0.0` tag.
 
 ## Risk register
