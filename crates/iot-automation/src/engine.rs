@@ -55,8 +55,9 @@ use iot_proto_core::iot::device::v1::EntityState;
 use prost::Message as _;
 use tracing::{debug, info, warn};
 
-use crate::expr::eval_bool;
+use crate::expr::eval_bool_within;
 use crate::rule::{RawAction, Rule};
+use crate::DEFAULT_EVAL_TIMEOUT_MS;
 
 /// How long the idempotency cache remembers a `(rule, subject,
 /// payload_hash)` key. 5 s matches the zigbee2mqtt / typical sensor
@@ -76,6 +77,9 @@ pub struct Engine {
     bus: Bus,
     audit: Option<Arc<AuditLog>>,
     idempotency: Arc<Mutex<HashMap<String, Instant>>>,
+    /// Per-rule eval deadline, plumbed into [`eval_bool_within`].
+    /// See [`crate::Config`] for tuning rationale.
+    eval_timeout: Duration,
 }
 
 impl Engine {
@@ -95,7 +99,17 @@ impl Engine {
             bus,
             audit,
             idempotency: Arc::new(Mutex::new(HashMap::new())),
+            eval_timeout: Duration::from_millis(DEFAULT_EVAL_TIMEOUT_MS),
         }
+    }
+
+    /// Override the per-rule eval deadline (default
+    /// [`DEFAULT_EVAL_TIMEOUT_MS`] ms). Builder-style — most callers
+    /// thread this through from [`crate::Config::eval_timeout`].
+    #[must_use]
+    pub fn with_eval_timeout(mut self, timeout: Duration) -> Self {
+        self.eval_timeout = timeout;
+        self
     }
 
     /// Subscribe to the union of all rule triggers and run forever.
@@ -145,7 +159,7 @@ impl Engine {
             if !rule.triggers_on(subject) {
                 continue;
             }
-            match eval_bool(&rule.when, &payload) {
+            match eval_bool_within(&rule.when, &payload, self.eval_timeout).await {
                 Ok(true) => {
                     // Short-circuit on idempotency: same rule, same
                     // subject, same payload bytes within the TTL count
