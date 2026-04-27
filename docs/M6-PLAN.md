@@ -64,10 +64,20 @@ researchers can already file disclosures while the rest of M6 runs.
   appears in the security.txt's `Encryption:` field.
 - [ ] **SLSA hard-gate** — flip `continue-on-error: true` →
   `false` in `.github/workflows/ci.yml`'s SLSA provenance step.
-  M2 introduced the soft mode because the private repo couldn't
-  attest publicly; the repo went public in M5a so the gate flips.
-  Verify a tag build fails cleanly when provenance fails (force
-  a test breakage to confirm the gate).
+  **BLOCKED** on a product decision: at the v0.6.0-m5b release-
+  ceremony attempt, the attestation API rejected the call with
+  "Feature not available for user-owned private repositories"
+  (run 25005026705). To unblock, pick one:
+  * `gh repo edit KennethEhmsen/iot-athome --visibility public`
+    — flips the repo to public; attestation API works
+    immediately; W1 closes by removing the
+    `continue-on-error: true` line.
+  * Upgrade the GitHub plan to one with private-repo
+    attestations (Team / Enterprise tier).
+  The M2-era assumption "the repo will go public in M5a" was
+  incorrect; the repo stayed private. Until either choice
+  above, this step ships as a warning, with cosign + Rekor
+  carrying the signature story.
 - [ ] **Reproducibility byte-match** — the M2 reproducibility job
   builds twice + diffoscope-diffs; M6 adds a hard `exit 1` if
   diffoscope reports any difference. Today the job's `success`

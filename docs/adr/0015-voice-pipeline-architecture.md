@@ -119,7 +119,7 @@ commit that implemented the corresponding piece.
 | W4c | Real STT via `whisper-rs` (feature: `stt-whisper`) | `893e45a` |
 | W4b | Energy-VAD wake detector (pure-Rust) | `2551597` |
 | W4b.5 | Phrase-specific wake-word via rustpotter (feature: `wake-phrase`) | `ee7ad3f` |
-| W4d | Real TTS via `piper` binary shell-out | this commit |
+| W4d | Real TTS via `piper` binary shell-out | `b8a960b` |
 
 ### Build-prereq ladder
 

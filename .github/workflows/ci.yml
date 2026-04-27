@@ -238,19 +238,34 @@ jobs:
             cosign sign-blob --yes "$f" --bundle "$f.cosign.bundle"
           done
       - name: SLSA provenance
-        # M6 W1 hard-gate: this step's failure now fails the `sign`
-        # job, which in turn blocks the `publish` job (via
-        # `needs: [sign, reproducibility]`). The repository is
-        # public (`KennethEhmsen/iot-athome`) so GitHub's
-        # attestation API accepts the call; the M2-era
-        # `continue-on-error: true` workaround retires here.
+        # KEPT AS A WARNING (`continue-on-error: true`).
         #
-        # When this step fails on a tag, the release ceremony
-        # halts cleanly — no half-signed artifacts, no orphan
-        # Rekor entry, no "the bundle says signed but provenance
-        # is missing" ambiguity. ADR-0006 §"plumbed as warning,
-        # move to gate in M6" closes with this commit.
+        # The M6 W1 plan was to flip this to a hard-gate, but the
+        # attempt at v0.6.0-m5b's release-ceremony run failed
+        # with: "Failed to persist attestation: Feature not
+        # available for user-owned private repositories. To
+        # enable this feature, please make this repository
+        # public." (run 25005026705).
+        #
+        # The repo is currently `KennethEhmsen/iot-athome` —
+        # user-owned + private — and GitHub's attestations API
+        # is gated behind public visibility OR a paid plan that
+        # includes private-repo attestations. Until one of those
+        # changes, this step has to stay continue-on-error or
+        # every tag run fails permanently at sign.
+        #
+        # The `cosign sign-blob` step above already signs every
+        # artifact + records a Rekor entry, so the release's
+        # authenticity story is intact. SLSA-L3 provenance is
+        # the strict-superset attestation that's missing.
+        #
+        # M6 W1 status: BLOCKED on visibility-or-plan decision.
+        # docs/M6-PLAN.md tracks. To unblock: either
+        #   gh repo edit KennethEhmsen/iot-athome --visibility public
+        # OR upgrade the GitHub plan to one with private-repo
+        # attestations, then remove `continue-on-error` here.
         uses: actions/attest-build-provenance@v4
+        continue-on-error: true
         with:
           subject-path: 'artifacts/**/iot-*'
 
