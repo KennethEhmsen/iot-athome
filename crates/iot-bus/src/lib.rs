@@ -179,6 +179,23 @@ impl Bus {
     pub fn raw(&self) -> &async_nats::Client {
         &self.client
     }
+
+    /// Construct a `Bus` from a pre-existing `async_nats::Client`,
+    /// bypassing the mTLS connect path.
+    ///
+    /// Intended for integration tests (where a testcontainers NATS
+    /// instance speaks plaintext) and for callers that manage their
+    /// own connection lifecycle. Production code should go through
+    /// [`Bus::connect`] so mTLS + the optional credentials handshake
+    /// are applied uniformly.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn from_client(client: async_nats::Client, publisher: impl Into<String>) -> Self {
+        Self {
+            client,
+            publisher: publisher.into(),
+        }
+    }
 }
 
 /// Best-effort extraction of the active W3C traceparent from the

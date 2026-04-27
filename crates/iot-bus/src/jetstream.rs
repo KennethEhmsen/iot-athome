@@ -83,11 +83,23 @@ impl Bus {
     ///
     /// Backed by an ephemeral JetStream pull-consumer with
     /// `DeliverPolicy::LastPerSubject` and `filter_subject = pattern`.
-    /// The consumer reads each subject's latest retained message
-    /// exactly once, then signals "no more" via `num_pending == 0`
-    /// — at which point the call returns. The consumer is dropped
-    /// (and the server collects it) when the consumer handle goes
-    /// out of scope at function end.
+    /// The call drains the consumer in batches of [`WILDCARD_BATCH_SIZE`]
+    /// until `num_pending == 0`, so the returned vec contains every
+    /// matching subject's latest retained message regardless of how
+    /// many devices the home has.
+    ///
+    /// **Soft cap.** A misbehaving stream (or a home with truly huge
+    /// device counts) is bounded by [`WILDCARD_MAX_BATCHES`] iterations
+    /// — at most `WILDCARD_BATCH_SIZE * WILDCARD_MAX_BATCHES`
+    /// (= 10 240) subjects per call. Above that we warn-log and
+    /// return what we got: past 10 K, the panel UI is the bottleneck
+    /// long before the storage layer is. Callers can re-call to drain
+    /// the rest if they really need to.
+    ///
+    /// **Backpressure note.** The gateway WS handler streams these
+    /// out one-by-one to the client. If the panel reads slower than
+    /// the replay produces, the WS write buffer grows; that's a
+    /// separate concern for the WS handler to manage (M6).
     ///
     /// Use this from the gateway WS handler when a panel client
     /// subscribes to a wildcard subject — every device's last-known
@@ -124,43 +136,76 @@ impl Bus {
             .await
             .map_err(|e| JetstreamError::LastMsg(format!("create consumer: {e}")))?;
 
-        // Use the consumer's info for `num_pending` — that's the
-        // count of last-per-subject messages waiting. Bound the
-        // batch fetch by it; if zero, return early. `info()` takes
-        // `&mut self`; clone first so the underlying `consumer`
-        // remains usable for the subsequent `fetch()`.
-        let mut info_handle = consumer.clone();
-        let pending = info_handle
-            .info()
-            .await
-            .map_err(|e| JetstreamError::LastMsg(format!("consumer info: {e}")))?
-            .num_pending;
-        if pending == 0 {
-            return Ok(Vec::new());
-        }
+        let mut out: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut drained = false;
+        for _ in 0..WILDCARD_MAX_BATCHES {
+            // `info()` takes `&mut self`; clone first so the
+            // underlying `consumer` remains usable for `fetch()`.
+            let mut info_handle = consumer.clone();
+            let pending = info_handle
+                .info()
+                .await
+                .map_err(|e| JetstreamError::LastMsg(format!("consumer info: {e}")))?
+                .num_pending;
+            if pending == 0 {
+                drained = true;
+                break;
+            }
 
-        // Cap batch at a sensible limit; fetches above this would
-        // chunk into multiple calls in a real load scenario but
-        // wildcard panel-replay caps at the device count, which is
-        // O(100) for any reasonable home.
-        let batch_size = pending.min(1024);
-        let mut batch = consumer
-            .fetch()
-            .max_messages(usize::try_from(batch_size).unwrap_or(1024))
-            .messages()
-            .await
-            .map_err(|e| JetstreamError::LastMsg(format!("fetch batch: {e}")))?;
+            let batch_size = pending.min(WILDCARD_BATCH_SIZE as u64);
+            let mut batch = consumer
+                .fetch()
+                .max_messages(usize::try_from(batch_size).unwrap_or(WILDCARD_BATCH_SIZE))
+                .messages()
+                .await
+                .map_err(|e| JetstreamError::LastMsg(format!("fetch batch: {e}")))?;
 
-        let mut out = Vec::with_capacity(usize::try_from(batch_size).unwrap_or(0));
-        while let Some(msg_res) = batch.next().await {
-            match msg_res {
-                Ok(msg) => out.push((msg.subject.to_string(), msg.payload.to_vec())),
-                Err(e) => return Err(JetstreamError::LastMsg(format!("stream item: {e}"))),
+            while let Some(msg_res) = batch.next().await {
+                match msg_res {
+                    Ok(msg) => out.push((msg.subject.to_string(), msg.payload.to_vec())),
+                    Err(e) => return Err(JetstreamError::LastMsg(format!("stream item: {e}"))),
+                }
             }
         }
+
+        if !drained {
+            tracing::warn!(
+                pattern,
+                returned = out.len(),
+                cap_subjects = WILDCARD_BATCH_SIZE * WILDCARD_MAX_BATCHES,
+                "last_state_wildcard hit soft cap; further subjects truncated — \
+                 caller may re-invoke to drain the rest"
+            );
+        }
+
+        // M6 will replace this with a Prometheus counter; for now a
+        // structured debug log gives operators a per-call subject
+        // count without a metrics dependency.
+        tracing::debug!(
+            metric = "iot_bus.wildcard_replay.subjects_returned",
+            pattern,
+            count = out.len(),
+            drained,
+            "wildcard replay returned"
+        );
+
         Ok(out)
     }
 }
+
+/// Per-fetch batch ceiling for [`Bus::last_state_wildcard`].
+///
+/// 1024 is a round number well below the JetStream pull-consumer's
+/// own per-fetch limit and large enough that O(100)-device homes
+/// drain in a single batch.
+pub const WILDCARD_BATCH_SIZE: usize = 1024;
+
+/// Total batch budget for [`Bus::last_state_wildcard`].
+///
+/// `WILDCARD_BATCH_SIZE * WILDCARD_MAX_BATCHES` = 10 240 subjects
+/// per call. Above that the panel UI is the bottleneck, not the
+/// storage layer; we warn-log and let the caller re-invoke.
+pub const WILDCARD_MAX_BATCHES: usize = 10;
 
 /// Public thin wrapper around `async_nats::jetstream` errors.
 ///
