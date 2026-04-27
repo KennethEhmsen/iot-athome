@@ -222,7 +222,11 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v6
-      - uses: sigstore/cosign-installer@v4
+      # sigstore/cosign-installer's current major is v3 (April 2026).
+      # The earlier `@v4` pin tripped a runner-resolve error
+      # ("unable to find version `v4`") on the M5b release-ceremony
+      # tag run. Track upstream for v4 when it ships.
+      - uses: sigstore/cosign-installer@v3
       - uses: actions/download-artifact@v8
         with:
           path: artifacts/
