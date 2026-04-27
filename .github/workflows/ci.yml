@@ -121,7 +121,14 @@ jobs:
     name: test
     needs: preflight
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # 45 min: cold-cache `cargo nextest run --workspace --all-targets`
+    # against the M5b workspace size (18 crates + dev-deps including
+    # testcontainers + rustls + tonic stack) is consistently 17-22
+    # minutes on a shared ubuntu-24.04 runner. The previous 20-min
+    # cap killed the v0.6.0-m5b tag's run mid-compile (24999220512,
+    # test stage timing 14:00:31 → 14:20:56). Caching is a follow-up;
+    # for now headroom > tightness.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -249,7 +256,13 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # 60 min: two `cargo build --workspace --release` runs from a
+    # cold cache (18 crates + heavy transitives like rustls /
+    # async-nats / wasmtime / sqlx) are 12-18 min each, plus the
+    # `cargo clean` between, plus diffoscope. The previous 30-min
+    # cap left no headroom on a slow runner — bump for the M5b
+    # workspace size; revisit if a future cargo-cache step lands.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
