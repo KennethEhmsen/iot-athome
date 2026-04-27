@@ -218,7 +218,12 @@ fn shape_event(subject: &str, iot_type: &str, payload: &[u8]) -> serde_json::Val
 
 /// Convert a `google.protobuf.Value` (wrapped by prost-types) to
 /// `serde_json::Value`. Unknown or malformed values become `null`.
-fn prost_to_json(v: Option<prost_types::Value>) -> serde_json::Value {
+///
+/// `pub(crate)` so the M5b history-endpoint handler in `handlers.rs`
+/// reuses the same decoder (one place to fix EntityState payload
+/// shape-bugs — important since the panel chart and the live stream
+/// must agree on number-vs-string typing for a given entity).
+pub(crate) fn prost_to_json(v: Option<prost_types::Value>) -> serde_json::Value {
     use prost_types::value::Kind;
     let Some(v) = v else {
         return serde_json::Value::Null;

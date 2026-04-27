@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { listDevices, type Device } from "../api/devices";
 import { openStream, parseSubject, type StreamClient, type StreamStatus } from "../api/stream";
 import { getAccessToken, OIDC_ENABLED } from "../auth/oidc";
@@ -81,8 +82,8 @@ export default function Devices() {
       {loading && <p className="text-white/60">Loading&hellip;</p>}
       {error && (
         <p className="text-amber-400 text-sm">
-          Gateway unreachable ({error}). Bring up the stack with <code>just dev</code> and
-          the registry + gateway binaries.
+          Gateway unreachable ({error}). Bring up the stack with <code>just dev</code> and the
+          registry + gateway binaries.
         </p>
       )}
       {!loading && !error && devices.length === 0 && (
@@ -113,6 +114,13 @@ function DeviceRow({
       <div className="flex items-baseline gap-3">
         <span className="text-xs text-white/40 font-mono">{device.id.slice(0, 8)}</span>
         <span className="font-medium">{device.label || device.model || device.id}</span>
+        <Link
+          to={`/devices/${device.id}/history`}
+          className="text-xs text-white/50 hover:text-white/90 underline-offset-2 hover:underline"
+          title="Open history chart"
+        >
+          history
+        </Link>
         <span className="ml-auto text-xs text-white/40">{device.integration}</span>
       </div>
       {entries.length > 0 && (

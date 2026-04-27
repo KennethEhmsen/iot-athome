@@ -10,6 +10,9 @@ use iot_proto::iot::common::v1::Ulid as PbUlid;
 use iot_proto::iot::registry::v1::{
     DeleteDeviceRequest, GetDeviceRequest, ListDevicesRequest, UpsertDeviceRequest,
 };
+// Message trait import lets `EntityState::decode(...)` resolve in
+// `get_device_history` for the per-row decoded view (M5b W1).
+use prost::Message as _;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
@@ -68,15 +71,39 @@ pub struct HistoryQuery {
     pub limit: Option<i64>,
 }
 
-/// One row in the `GET /devices/{id}/history` response. `payload_b64`
-/// is the original message bytes (Protobuf-encoded EntityState for
-/// state subjects); the panel decodes per its own needs.
+/// One row in the `GET /devices/{id}/history` response.
+///
+/// We surface both a decoded view (for the panel's chart) and the
+/// original `payload_b64` (for callers that want raw bytes —
+/// debugging, replay tooling). The decoded view mirrors the
+/// WS-stream's [`shape_event`] shape so a single chart component
+/// works for both live + historical points.
+///
+/// [`shape_event`]: crate::stream::shape_event
 #[derive(Debug, Serialize)]
 pub struct HistoryRowJson {
     pub device_id: String,
     pub subject: String,
-    /// RFC 3339 capture timestamp (UTC, microsecond precision).
+    /// RFC 3339 capture timestamp (UTC, microsecond precision) — the
+    /// **server-side** ts the row was inserted with. The protobuf
+    /// payload may carry its own `at` (sensor wall-clock); we keep
+    /// the server ts because chronological ordering for chart
+    /// purposes is dominated by capture order, not sensor clocks
+    /// (some sensors have wildly skewed RTCs).
     pub at: String,
+    /// Entity ULID extracted from the protobuf payload. `None` for
+    /// non-state subjects (events, availability) where the panel
+    /// chart isn't relevant anyway.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entity_id: Option<String>,
+    /// Decoded `iot.device.v1.EntityState.value` as JSON. Numbers
+    /// stay numbers, strings stay strings, structs stay objects.
+    /// `None` when the payload didn't decode as EntityState.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+    /// Raw bytes, base64-STD encoded. Kept for tooling that wants
+    /// to re-decode (e.g. swap the protobuf schema and replay).
+    /// Not load-bearing for the panel.
     pub payload_b64: String,
 }
 
@@ -262,11 +289,28 @@ pub async fn get_device_history(
 
     let rows: Vec<HistoryRowJson> = rows
         .into_iter()
-        .map(|r| HistoryRowJson {
-            device_id: r.device_id,
-            subject: r.subject,
-            at: r.ts.to_rfc3339(),
-            payload_b64: B64.encode(&r.payload),
+        .map(|r| {
+            // Best-effort EntityState decode. Non-state subjects
+            // (events, availability) won't decode cleanly under this
+            // schema; we surface `None` for entity_id+value rather
+            // than dropping the row, so the panel can still render
+            // the timeline marker if it wants to.
+            let (entity_id, value) =
+                match iot_proto::iot::device::v1::EntityState::decode(r.payload.as_slice()) {
+                    Ok(state) => (
+                        state.entity_id.map(|u| u.value),
+                        Some(crate::stream::prost_to_json(state.value)),
+                    ),
+                    Err(_) => (None, None),
+                };
+            HistoryRowJson {
+                device_id: r.device_id,
+                subject: r.subject,
+                at: r.ts.to_rfc3339(),
+                entity_id,
+                value,
+                payload_b64: B64.encode(&r.payload),
+            }
         })
         .collect();
 

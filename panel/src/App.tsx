@@ -3,6 +3,7 @@ import { useAuth } from "./auth/useAuth";
 import { signIn, signOut } from "./auth/oidc";
 import { ErrorBoundary } from "./ErrorBoundary";
 import Callback from "./pages/Callback";
+import DeviceHistory from "./pages/DeviceHistory";
 import Devices from "./pages/Devices";
 import Home from "./pages/Home";
 
@@ -26,6 +27,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Home />} />
             <Route path="/devices" element={<Devices />} />
+            <Route path="/devices/:id/history" element={<DeviceHistory />} />
             <Route path="/callback" element={<Callback />} />
           </Routes>
         </ErrorBoundary>
