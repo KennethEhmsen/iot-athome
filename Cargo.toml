@@ -18,6 +18,12 @@ members = [
   # Always compiles (sqlx-postgres is already in the workspace dep
   # graph); enabled at runtime via IOT_TIMESCALE_URL env.
   "crates/iot-history",
+  # M5b W2: local voice pipeline scaffold (ADR-0015 — host-side
+  # daemon). Trait-shaped pipeline (audio → wake → stt → intent →
+  # sink) with stub impls; real model deps land in subsequent
+  # commits behind cargo features so cross-platform CI doesn't
+  # need a CMake bootstrap until the real impls are wired.
+  "crates/iot-voice",
 ]
 exclude = [
   "firmware/*",

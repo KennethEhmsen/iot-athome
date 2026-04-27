@@ -1,0 +1,36 @@
+[package]
+name = "iot-voice"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "IoT-AtHome — local voice pipeline (wake → STT → intent → bus). M5b W2 scaffold."
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# Pipeline outputs ride the existing NATS bus; the binary path
+# (iot-voice daemon, separate commit) wires `IntentSink` through
+# iot-bus. The library itself stays bus-agnostic so unit tests
+# don't spin up a broker — `StubIntentSink` collects intents
+# in-memory.
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# Closed-domain phrase grammar tokenises words; `unicode-segmentation`
+# would be the real choice if/when we accept i18n input. Holding off
+# until M5b W3 — v1 grammar is ASCII-only ("turn on the kitchen
+# light") so a `str::split_whitespace`-based matcher suffices.
+tokio = { workspace = true, features = ["sync", "macros", "time"] }
+tracing.workspace = true
+chrono = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
