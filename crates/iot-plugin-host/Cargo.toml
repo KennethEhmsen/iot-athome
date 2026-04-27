@@ -40,8 +40,19 @@ tracing.workspace = true
 wasmtime.workspace = true
 # ABI 1.4.0 net.http capability — outbound HTTP for plugins polling
 # external APIs. The shared client lives in HostBindings; per-call
-# URL is checked against capabilities.net.outbound first.
-reqwest.workspace = true
+# URL is checked against capabilities.net.outbound first. The
+# `stream` feature gives us bytes_stream() for chunked-read body
+# size enforcement (Bucket 1 audit fix).
+reqwest = { workspace = true, features = ["stream"] }
+# url::Url canonicalisation for the net.outbound capability check.
+# Replaces the M5a-era naive `starts_with` matcher per Bucket 1
+# security audit — defends against userinfo / scheme / case / port
+# bypass classes that string-prefix matching missed.
+url.workspace = true
+# Streaming response body for the net.http capability — chunk
+# reader uses futures::StreamExt::next on reqwest's bytes_stream()
+# to enforce the per-call MAX_RESP_BODY_BYTES cap.
+futures.workspace = true
 # The wasm32-wasip2 target's preview-2 adapter links wasi:cli/stdin/etc.
 # imports even for plugins that never call stdio; we satisfy those by
 # wiring wasmtime-wasi's linker adder.

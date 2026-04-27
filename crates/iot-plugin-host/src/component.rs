@@ -331,7 +331,7 @@ impl crate::component::iot::plugin_host::mqtt::Host for PluginState {
 
 // ---------- net host impl (ABI 1.4.0) ----------
 //
-// Outbound HTTP for plugins polling external APIs. URL-prefix check
+// Outbound HTTP for plugins polling external APIs. URL check
 // against the manifest's `capabilities.net.outbound` allow-list
 // runs FIRST — anything outside the allow-list returns
 // capability.denied without touching reqwest, so a misconfigured
@@ -344,6 +344,55 @@ impl crate::component::iot::plugin_host::mqtt::Host for PluginState {
 // error. Body is opaque bytes; reqwest's automatic gzip / brotli /
 // deflate are all disabled by `build_net_client`, so plugins see
 // what came off the wire.
+//
+// Resource caps + header hardening (Bucket 1 audit fixes):
+//
+// * `MAX_REQ_BODY_BYTES` / `MAX_RESP_BODY_BYTES` cap memory use;
+//   per-call timeout + body cap together bound the worst case the
+//   host has to absorb from a malicious or runaway plugin.
+// * `FORBIDDEN_REQ_HEADERS` strips host-spoofing /
+//   credential-exfiltration headers a plugin might set. The host
+//   gets to decide `Host`, `Authorization`, `Cookie`,
+//   `Proxy-*`, `X-Forwarded-*` — plugins don't.
+// * Streaming chunk-read for the response so we abort early when
+//   bytes pile past the cap rather than buffering the whole body
+//   first. Catches both Content-Length advertised + chunked
+//   no-Content-Length attackers.
+
+/// Per-request body caps. Generous for the documented use case
+/// (weather APIs, energy tariffs, calendar feeds, notification
+/// sinks) — no legitimate poll surface needs more than this.
+const MAX_REQ_BODY_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
+const MAX_RESP_BODY_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
+
+/// Headers a plugin must not be allowed to set. Either:
+///
+/// * Spoof identity to upstream filters (`Host`, `X-Forwarded-*`).
+/// * Exfiltrate or override credentials the host might add later
+///   (`Authorization`, `Cookie`, `Proxy-Authorization`).
+/// * Trigger proxy behaviour the plugin shouldn't choose
+///   (`Proxy-*`).
+///
+/// Comparison is case-insensitive (HTTP header names are too).
+const FORBIDDEN_REQ_HEADERS: &[&str] = &[
+    "host",
+    "authorization",
+    "cookie",
+    "proxy-authorization",
+    "proxy-connection",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+    "x-real-ip",
+];
+
+/// True if `name` is in [`FORBIDDEN_REQ_HEADERS`]. Hot-path; avoid
+/// allocating a lower-cased copy of every header per request.
+fn header_forbidden(name: &str) -> bool {
+    FORBIDDEN_REQ_HEADERS
+        .iter()
+        .any(|f| name.eq_ignore_ascii_case(f))
+}
 
 impl crate::component::iot::plugin_host::net::Host for PluginState {
     #[tracing::instrument(
@@ -387,7 +436,20 @@ impl crate::component::iot::plugin_host::net::Host for PluginState {
             });
         };
 
-        // 3. Translate WIT request → reqwest::RequestBuilder.
+        // 3. Cap the request body before reqwest sees it.
+        if let Some(body) = req.body.as_ref() {
+            if body.len() > MAX_REQ_BODY_BYTES {
+                return Err(PluginError {
+                    code: "net.body_too_large".into(),
+                    message: format!(
+                        "request body {} bytes exceeds cap {MAX_REQ_BODY_BYTES}",
+                        body.len()
+                    ),
+                });
+            }
+        }
+
+        // 4. Translate WIT request → reqwest::RequestBuilder.
         // Method is normalised to upper-case; reqwest::Method::from_bytes
         // accepts the canonical set + emits a sensible error for
         // garbage like "GETTT".
@@ -397,14 +459,20 @@ impl crate::component::iot::plugin_host::net::Host for PluginState {
                 message: format!("invalid HTTP method `{}`: {e}", req.method),
             })?;
         let mut builder = client.request(method, &req.url);
+        // Header filter — see FORBIDDEN_REQ_HEADERS doc for the
+        // attack classes this defends against.
         for (k, v) in &req.headers {
+            if header_forbidden(k) {
+                warn!(header = %k, "net.http: dropping plugin-supplied forbidden header");
+                continue;
+            }
             builder = builder.header(k.as_str(), v.as_str());
         }
         if let Some(body) = req.body {
             builder = builder.body(body);
         }
 
-        // 4. Execute. Transport-level failures (DNS, TCP, TLS,
+        // 5. Execute. Transport-level failures (DNS, TCP, TLS,
         // timeout) → net.transport. HTTP-level (4xx/5xx) lands as
         // Ok with the status code populated.
         let resp = builder.send().await.map_err(|e| {
@@ -425,14 +493,40 @@ impl crate::component::iot::plugin_host::net::Host for PluginState {
                     .map(|s| (k.as_str().to_owned(), s.to_owned()))
             })
             .collect();
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| PluginError {
+
+        // 6. Early-reject on advertised Content-Length over the cap
+        // — saves us streaming a body we'll just throw away.
+        if let Some(len) = resp.content_length() {
+            if len > MAX_RESP_BODY_BYTES as u64 {
+                return Err(PluginError {
+                    code: "net.body_too_large".into(),
+                    message: format!(
+                        "response Content-Length {len} bytes exceeds cap {MAX_RESP_BODY_BYTES}"
+                    ),
+                });
+            }
+        }
+
+        // 7. Stream the body chunk-by-chunk with a running cap.
+        // Catches both Content-Length-advertised and chunked-
+        // transfer-encoding cases (no Content-Length) where the
+        // body lies about its size.
+        use futures::StreamExt as _;
+        let mut stream = resp.bytes_stream();
+        let mut body: Vec<u8> = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| PluginError {
                 code: "net.transport".into(),
-                message: format!("read body: {e}"),
-            })?
-            .to_vec();
+                message: format!("read body chunk: {e}"),
+            })?;
+            if body.len().saturating_add(chunk.len()) > MAX_RESP_BODY_BYTES {
+                return Err(PluginError {
+                    code: "net.body_too_large".into(),
+                    message: format!("streamed response body exceeded cap {MAX_RESP_BODY_BYTES}"),
+                });
+            }
+            body.extend_from_slice(&chunk);
+        }
         let resp_bytes = body.len();
         debug!(status, resp_bytes, "net.http ok");
 
@@ -441,5 +535,40 @@ impl crate::component::iot::plugin_host::net::Host for PluginState {
             headers,
             body,
         })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod net_header_filter_tests {
+    use super::header_forbidden;
+
+    #[test]
+    fn forbids_host_spoofing_and_credential_headers() {
+        // Host-spoofing class.
+        assert!(header_forbidden("Host"));
+        assert!(header_forbidden("host"));
+        assert!(header_forbidden("HOST"));
+        assert!(header_forbidden("X-Forwarded-For"));
+        assert!(header_forbidden("x-forwarded-host"));
+        assert!(header_forbidden("X-Real-IP"));
+
+        // Credential exfiltration / override class.
+        assert!(header_forbidden("Authorization"));
+        assert!(header_forbidden("authorization"));
+        assert!(header_forbidden("Cookie"));
+        assert!(header_forbidden("Proxy-Authorization"));
+        assert!(header_forbidden("proxy-connection"));
+    }
+
+    #[test]
+    fn permits_typical_api_headers() {
+        // The headers a polling-API plugin normally needs.
+        assert!(!header_forbidden("Content-Type"));
+        assert!(!header_forbidden("Accept"));
+        assert!(!header_forbidden("Accept-Language"));
+        assert!(!header_forbidden("User-Agent"));
+        assert!(!header_forbidden("X-Request-Id"));
+        assert!(!header_forbidden("X-Custom-Vendor-Header"));
     }
 }

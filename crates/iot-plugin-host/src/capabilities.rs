@@ -138,35 +138,83 @@ impl CapabilityMap {
 
     /// Check an outbound URL against the `net.outbound` allow-list.
     ///
-    /// Match semantics: URL-prefix match with a path-or-query
-    /// boundary check, so an entry of `https://api.open-meteo.com`
-    /// authorises:
+    /// **Match semantics: structural URL parse, not string prefix.**
+    /// Both the manifest entry and the plugin-supplied URL are
+    /// parsed via [`url::Url`]; an entry authorises a request URL
+    /// only when **all** of the following hold:
     ///
-    /// * `https://api.open-meteo.com`            — exact equality
-    /// * `https://api.open-meteo.com/v1/forecast` — path under
-    /// * `https://api.open-meteo.com?q=1`         — query directly
-    /// * `https://api.open-meteo.com#frag`        — fragment directly
+    /// * Schemes match exactly (case-insensitive). Only `http` and
+    ///   `https` are allowed; `file://`, `gopher://`, `data:`, etc.
+    ///   are rejected on both sides.
+    /// * Hosts match exactly (case-insensitive). The url crate's
+    ///   ASCII-canonical IDN form is used so visually-similar
+    ///   Unicode homoglyphs don't sneak past.
+    /// * Ports match (with default-port awareness — `https://x:443`
+    ///   == `https://x`).
+    /// * The request URL's path starts with the entry's path **and**
+    ///   the next character past the prefix in the request path is
+    ///   `/` or end-of-path (no segment-mid bypass).
+    /// * The request URL has **no userinfo** (`https://user@host/x`
+    ///   is rejected unconditionally — userinfo can mask the actual
+    ///   host from a casual reader).
     ///
-    /// but NOT `https://api.open-meteo.com.evil.example/x` — the
-    /// next character past the prefix must be one of `/`, `?`, `#`,
-    /// or end-of-string. This is the same safety property the
-    /// `Origin` header check uses in browsers; without it,
-    /// `acme.com` would authorise `acme.com.evil.example`.
+    /// Compared with the M5a-era string-prefix matcher this defends
+    /// against:
     ///
-    /// Operators who want exact-host authority can simply write the
-    /// scheme + host + trailing `/` (`https://api.open-meteo.com/`);
-    /// operators who want a sub-path scope write the full sub-path.
+    /// * `https://api.example.com@evil.com/x` — userinfo bypass.
+    /// * `https://API.EXAMPLE.COM/x` — case-only match (the old
+    ///   matcher would deny something the operator intended to
+    ///   allow; the new matcher canonicalises both sides).
+    /// * `https://api.example.com:1337/x` against an entry of
+    ///   `https://api.example.com` — port-mismatch must deny.
+    /// * `file:///etc/passwd`, `gopher://...` — scheme confusion.
+    /// * `https://api.example.com.evil/x` — dotted-suffix host (the
+    ///   old boundary-char check caught this; the new structural
+    ///   match catches it more cleanly via host equality).
+    ///
+    /// Operators write entries as full URLs:
+    /// `https://api.open-meteo.com` (whole-host scope) or
+    /// `https://api.acme.com/v1/forecast` (sub-path scope).
     ///
     /// # Errors
-    /// Returns [`Denied`] if `url` isn't covered by an allow-list
-    /// entry. The error code is the standard
-    /// `capability.denied`.
+    /// Returns [`Denied`] for any URL that doesn't match an entry,
+    /// or for any URL the parser refuses (malformed input). Error
+    /// code is the standard `capability.denied`.
     pub fn check_net_outbound(&self, url: &str) -> Result<(), Denied> {
+        let req = url::Url::parse(url).map_err(|e| Denied {
+            code: "capability.denied",
+            message: format!("net.outbound on `{url}`: malformed URL: {e}"),
+        })?;
+
+        // Scheme allow-list — http/https only. Plugins shouldn't be
+        // able to escape into file://, gopher://, data:, javascript:,
+        // or anything else weird via this capability.
+        if !matches!(req.scheme(), "http" | "https") {
+            return Err(Denied {
+                code: "capability.denied",
+                message: format!(
+                    "net.outbound on `{url}`: scheme `{}` not allowed (only http/https)",
+                    req.scheme()
+                ),
+            });
+        }
+
+        // Userinfo bypass class: `https://api.example.com@evil/x`
+        // parses with host = "evil" but reads (in haste) like the
+        // host is api.example.com. Reject unconditionally — no
+        // legitimate API uses URL-encoded credentials these days.
+        if !req.username().is_empty() || req.password().is_some() {
+            return Err(Denied {
+                code: "capability.denied",
+                message: format!("net.outbound on `{url}`: userinfo (user/pass) not allowed"),
+            });
+        }
+
         if self
             .net
             .outbound
             .iter()
-            .any(|p| url_starts_with_boundary(p, url))
+            .any(|entry| url_entry_authorises(entry, &req))
         {
             return Ok(());
         }
@@ -177,18 +225,57 @@ impl CapabilityMap {
     }
 }
 
-/// URL-prefix match with the path/query/fragment boundary safety
-/// property described on [`CapabilityMap::check_net_outbound`].
-fn url_starts_with_boundary(prefix: &str, url: &str) -> bool {
-    if !url.starts_with(prefix) {
+/// Structural match between a manifest allow-list entry and a
+/// plugin-supplied request URL. See
+/// [`CapabilityMap::check_net_outbound`] for the contract.
+///
+/// Returns `false` if the entry is itself malformed (we don't
+/// rescue manifests with broken URLs — they're a configuration
+/// bug operators should fix).
+fn url_entry_authorises(entry: &str, req: &url::Url) -> bool {
+    let Ok(allow) = url::Url::parse(entry) else {
+        return false;
+    };
+
+    // Same scheme (case-insensitive — url::Url already lowers).
+    if allow.scheme() != req.scheme() {
         return false;
     }
-    match url.as_bytes().get(prefix.len()) {
-        // Exact match (URL == prefix).
-        None => true,
-        // Path / query / fragment boundary.
-        Some(&c) => matches!(c, b'/' | b'?' | b'#'),
+    // Same host (case-insensitive). url::Url returns ASCII-canonical
+    // form via IDN-to-ASCII so Unicode homoglyphs are folded.
+    if allow.host_str() != req.host_str() {
+        return false;
     }
+    // Same port (with default-port awareness — Url::port_or_known_default
+    // resolves `https` → 443, `http` → 80).
+    if allow.port_or_known_default() != req.port_or_known_default() {
+        return false;
+    }
+    // Path-prefix match with segment boundary. Entry path "" is
+    // treated as "/", so a host-scope entry like
+    // `https://api.example.com` (path = "") authorises every path.
+    let allow_path = if allow.path().is_empty() {
+        "/"
+    } else {
+        allow.path()
+    };
+    let req_path = req.path();
+    if !req_path.starts_with(allow_path) {
+        return false;
+    }
+    // Boundary check on path: the next char past the entry's path
+    // must be `/` or end-of-path. This catches
+    // `entry=/v1/forecast` against `req=/v1/forecastoid` (segment
+    // splice attacker). If the entry already ends in `/` then any
+    // following char is fine — the operator chose a sub-path
+    // scope and what comes after is ordinary URL content.
+    if allow_path.ends_with('/') {
+        return true;
+    }
+    matches!(
+        req_path.as_bytes().get(allow_path.len()),
+        None | Some(&b'/')
+    )
 }
 
 /// Naive NATS-style match. `foo.>` matches `foo.anything.deep`; `foo.bar`
@@ -389,7 +476,7 @@ mod tests {
     #[test]
     fn net_outbound_authorises_exact_match() {
         let m = net_only(vec!["https://api.open-meteo.com"]);
-        assert!(m.check_net_outbound("https://api.open-meteo.com").is_ok());
+        assert!(m.check_net_outbound("https://api.open-meteo.com/").is_ok());
     }
 
     #[test]
@@ -402,22 +489,20 @@ mod tests {
             .check_net_outbound("https://api.open-meteo.com/v1/forecast?lat=1&lon=2")
             .is_ok());
         assert!(m
-            .check_net_outbound("https://api.open-meteo.com#frag")
+            .check_net_outbound("https://api.open-meteo.com/#frag")
             .is_ok());
     }
 
     #[test]
     fn net_outbound_blocks_dotted_suffix_attacker() {
-        // The classic Origin-header attack: prefix `acme.com` must
-        // not authorise `acme.com.evil.example`. The boundary check
-        // requires the next char past the prefix to be /, ?, #, or
-        // end-of-string.
+        // Pre-Bucket-1 the boundary-char check caught this; the
+        // structural matcher catches it more cleanly via host equality.
         let m = net_only(vec!["https://api.open-meteo.com"]);
         assert!(m
             .check_net_outbound("https://api.open-meteo.com.evil.example/x")
             .is_err());
         assert!(m
-            .check_net_outbound("https://api.open-meteo.commerce.example")
+            .check_net_outbound("https://api.open-meteo.commerce.example/")
             .is_err());
     }
 
@@ -431,7 +516,6 @@ mod tests {
 
     #[test]
     fn net_outbound_with_path_scope_only_authorises_subpath() {
-        // Operator wants the plugin to hit only one specific path.
         let m = net_only(vec!["https://api.acme.com/v1/forecast"]);
         assert!(m
             .check_net_outbound("https://api.acme.com/v1/forecast")
@@ -446,12 +530,17 @@ mod tests {
         assert!(m
             .check_net_outbound("https://api.acme.com/v1/billing")
             .is_err());
+        // Segment-splice attacker — same host, path that starts
+        // with the entry's path but isn't an actual sub-path.
+        assert!(m
+            .check_net_outbound("https://api.acme.com/v1/forecastoid")
+            .is_err());
     }
 
     #[test]
     fn net_outbound_default_is_deny_all() {
         let m = CapabilityMap::default();
-        assert!(m.check_net_outbound("https://api.open-meteo.com").is_err());
+        assert!(m.check_net_outbound("https://api.open-meteo.com/").is_err());
     }
 
     #[test]
@@ -469,5 +558,92 @@ mod tests {
         assert!(m
             .check_net_outbound("https://api.tibber.com/v1/billing")
             .is_err());
+    }
+
+    // ----------------------------------------- Bucket 1 audit-fix bypass tests
+
+    #[test]
+    fn net_outbound_blocks_userinfo_host_masking() {
+        // Confused-deputy: parser-fooled human sees
+        // `https://api.acme.com@evil.com` as an acme.com URL;
+        // url::Url parses host=evil.com. Reject userinfo
+        // unconditionally to short-circuit the whole class.
+        let m = net_only(vec!["https://api.acme.com"]);
+        assert!(m
+            .check_net_outbound("https://api.acme.com@evil.com/x")
+            .is_err());
+        assert!(m
+            .check_net_outbound("https://user:pass@api.acme.com/x")
+            .is_err());
+    }
+
+    #[test]
+    fn net_outbound_blocks_non_http_schemes() {
+        let m = net_only(vec!["https://api.acme.com"]);
+        // file:// — local FS read.
+        assert!(m.check_net_outbound("file:///etc/passwd").is_err());
+        // gopher:// — historic SSRF vector.
+        assert!(m.check_net_outbound("gopher://api.acme.com/x").is_err());
+        // data: — could be used to embed payloads.
+        assert!(m.check_net_outbound("data:text/plain,Hello").is_err());
+        // javascript: — meaningless to reqwest but rejected by
+        // construction.
+        assert!(m.check_net_outbound("javascript:alert(1)").is_err());
+    }
+
+    #[test]
+    fn net_outbound_canonicalises_case_to_match_entry() {
+        let m = net_only(vec!["https://api.open-meteo.com"]);
+        // Mixed case in the request URL is canonicalised by
+        // url::Url and matches the lower-case entry.
+        assert!(m
+            .check_net_outbound("https://API.OPEN-METEO.COM/v1/forecast")
+            .is_ok());
+        // Same for the scheme.
+        assert!(m
+            .check_net_outbound("HTTPS://api.open-meteo.com/v1/forecast")
+            .is_ok());
+    }
+
+    #[test]
+    fn net_outbound_port_aware() {
+        // Default port (443) match.
+        let m = net_only(vec!["https://api.acme.com"]);
+        assert!(m.check_net_outbound("https://api.acme.com:443/x").is_ok());
+        // Non-default port: must mismatch.
+        assert!(m.check_net_outbound("https://api.acme.com:8443/x").is_err());
+
+        // Operator declares an explicit non-default port.
+        let m = net_only(vec!["https://api.acme.com:8443"]);
+        assert!(m.check_net_outbound("https://api.acme.com:8443/x").is_ok());
+        assert!(m.check_net_outbound("https://api.acme.com/x").is_err());
+    }
+
+    #[test]
+    fn net_outbound_rejects_malformed_input() {
+        let m = net_only(vec!["https://api.acme.com"]);
+        // Garbage input — parser refuses.
+        assert!(m.check_net_outbound("not a url").is_err());
+        assert!(m.check_net_outbound("").is_err());
+    }
+
+    #[test]
+    fn net_outbound_ipv6_literal_match() {
+        // url::Url parses `[::1]` correctly. Operators using IPv6
+        // literals in net.outbound entries get them matched.
+        let m = net_only(vec!["http://[::1]:8080"]);
+        assert!(m.check_net_outbound("http://[::1]:8080/").is_ok());
+        // Different host with the same port: denied.
+        assert!(m.check_net_outbound("http://[::2]:8080/").is_err());
+    }
+
+    #[test]
+    fn net_outbound_host_only_entry_authorises_all_paths() {
+        // Operator declares a whole-host scope (no path component).
+        let m = net_only(vec!["https://api.example.com"]);
+        assert!(m.check_net_outbound("https://api.example.com/").is_ok());
+        assert!(m
+            .check_net_outbound("https://api.example.com/anything/deep")
+            .is_ok());
     }
 }

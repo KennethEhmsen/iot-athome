@@ -159,6 +159,14 @@ clap = { version = "4.5", features = ["derive", "env"] }
 # --- streams ---
 tokio-stream = "0.1"
 
+# --- url parsing ---
+# Used by iot-plugin-host's net.http capability check to canonicalise
+# plugin-supplied URLs (scheme + host + port + path-prefix matching
+# against the manifest allow-list). String-prefix `starts_with` was
+# the M5a's first cut but didn't defend against userinfo / scheme /
+# case bypass classes — see the Bucket 1 audit-fix commits.
+url = "2.5"
+
 # --- expression / rule engine ---
 # Real CEL (Common Expression Language) interpreter, M5a W2 — replaces
 # the M3-era hand-rolled subset in iot-automation::expr behind the
