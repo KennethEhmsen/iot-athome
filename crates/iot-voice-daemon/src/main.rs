@@ -31,8 +31,8 @@ use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand};
 use iot_bus::{Bus, Config as BusConfig};
 use iot_voice::{
-    IntentParser, Pipeline, RuleIntentParser, SpeechRecognizer, StubAudioSource,
-    StubSpeechRecognizer, StubWakeDetector,
+    EnergyVadWakeDetector, IntentParser, Pipeline, RuleIntentParser, SpeechRecognizer,
+    StubAudioSource, StubSpeechRecognizer, StubWakeDetector, WakeDetector,
 };
 use tracing::{info, warn};
 
@@ -159,7 +159,6 @@ async fn cmd_send(bus: &Bus, text: &str) -> Result<()> {
 /// source produces no frames, so loading a 140 MB model just to
 /// transcribe nothing is operator-error and we say so.
 async fn cmd_listen(bus: Bus, use_mic: bool, stt_model: Option<std::path::PathBuf>) -> Result<()> {
-    let wake = StubWakeDetector::default();
     let parser = RuleIntentParser::new();
     let sink = NatsIntentSink::new(bus);
 
@@ -170,6 +169,16 @@ async fn cmd_listen(bus: Bus, use_mic: bool, stt_model: Option<std::path::PathBu
     }
 
     let stt = build_stt(stt_model.as_deref())?;
+    // Real audio gets a real detector — energy-VAD self-
+    // calibrates over the first 2 s, then fires on sustained
+    // speech-like signal. Stub audio (no --use-mic) keeps the
+    // amplitude-stub for backwards-compat with the M5b W3 smoke
+    // tests.
+    let wake: Box<dyn WakeDetector> = if use_mic {
+        Box::new(EnergyVadWakeDetector::new())
+    } else {
+        Box::new(StubWakeDetector::default())
+    };
 
     if use_mic {
         run_with_mic(wake, stt, parser, sink).await
@@ -223,7 +232,7 @@ fn build_stt(model_path: Option<&std::path::Path>) -> Result<Box<dyn SpeechRecog
 
 #[cfg(feature = "mic")]
 async fn run_with_mic(
-    wake: StubWakeDetector,
+    wake: Box<dyn WakeDetector>,
     stt: Box<dyn SpeechRecognizer>,
     parser: RuleIntentParser,
     sink: NatsIntentSink,
@@ -242,7 +251,7 @@ async fn run_with_mic(
 // uniform — the await on the bail-fast path costs nothing.
 #[allow(clippy::unused_async)]
 async fn run_with_mic(
-    _wake: StubWakeDetector,
+    _wake: Box<dyn WakeDetector>,
     _stt: Box<dyn SpeechRecognizer>,
     _parser: RuleIntentParser,
     _sink: NatsIntentSink,

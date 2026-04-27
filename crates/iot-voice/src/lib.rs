@@ -51,6 +51,7 @@ pub mod pipeline;
 pub mod stt;
 pub mod synth;
 pub mod wake;
+pub mod wake_vad;
 #[cfg(feature = "whisper")]
 pub mod whisper;
 
@@ -64,6 +65,7 @@ pub use pipeline::{Pipeline, PipelineError, PipelineMetrics};
 pub use stt::{SpeechRecognizer, SttError, StubSpeechRecognizer};
 pub use synth::{StubSynthesizer, SynthError, Synthesizer};
 pub use wake::{StubWakeDetector, Wake, WakeDetector, WakeError};
+pub use wake_vad::EnergyVadWakeDetector;
 #[cfg(feature = "whisper")]
 pub use whisper::WhisperRecognizer;
 

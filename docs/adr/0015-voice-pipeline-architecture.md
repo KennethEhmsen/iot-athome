@@ -116,8 +116,9 @@ commit that implemented the corresponding piece.
 | W3 | Daemon binary + NATS sink | `e5e4396` |
 | W5 | Rule engine consumes `command.intent.>` | `96cb28e` |
 | W4a | Real audio capture via `cpal` (feature: `mic`) | `77491b1` |
-| W4c | Real STT via `whisper-rs` (feature: `stt-whisper`) | this commit |
-| W4b | Real wake-word detection | open |
+| W4c | Real STT via `whisper-rs` (feature: `stt-whisper`) | `893e45a` |
+| W4b | Energy-VAD wake detector (pure-Rust) | this commit |
+| W4b.5 | Phrase-specific wake-word (rustpotter / openWakeWord) | open |
 | W4d | Real TTS via `piper` | open |
 
 ### Build-prereq ladder

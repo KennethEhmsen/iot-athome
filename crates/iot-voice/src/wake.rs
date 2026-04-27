@@ -53,6 +53,18 @@ pub trait WakeDetector: Send {
     async fn observe(&mut self, frame: &AudioFrame) -> Result<Option<Wake>, WakeError>;
 }
 
+/// Blanket `Box<dyn>` impl so the daemon can pick a concrete
+/// detector at runtime (stub vs energy-VAD vs future
+/// phrase-specific) without varying `Pipeline`'s generic `W`
+/// parameter across run-modes. Mirrors the matching impl on
+/// [`crate::stt::SpeechRecognizer`].
+#[async_trait]
+impl WakeDetector for Box<dyn WakeDetector> {
+    async fn observe(&mut self, frame: &AudioFrame) -> Result<Option<Wake>, WakeError> {
+        (**self).observe(frame).await
+    }
+}
+
 /// Test-grade detector that fires on amplitude.
 ///
 /// **Not** a real wake-word detector. Useful for end-to-end tests
