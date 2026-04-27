@@ -66,12 +66,23 @@ enum Command {
     },
     /// Run the full pipeline (audio → wake → stt → intent → sink).
     ///
-    /// **Today**: stub stages — useful only for verifying the bus
-    /// integration end-to-end. The daemon will yield no real
-    /// intents because the stub audio source produces no frames.
-    /// **Tomorrow** (M5b W4+): real audio + wake + STT plug in
-    /// behind cargo features.
-    Listen,
+    /// With `--use-mic` (requires the `mic` cargo feature, which
+    /// pulls in `iot-voice/cpal`): real audio capture from the
+    /// platform's default input device. Without `--use-mic`: a
+    /// stub audio source that yields no frames — useful only for
+    /// confirming the daemon launches + the bus connects.
+    ///
+    /// Real wake-word + STT impls land in subsequent commits;
+    /// without them, even `--use-mic` produces no usable intents
+    /// (the stub wake fires on amplitude, the stub STT returns a
+    /// fixed phrase, both serve mostly as smoke-tests).
+    Listen {
+        /// Capture from the default microphone instead of the
+        /// stub. Refused at runtime if the binary wasn't built
+        /// with `--features mic`.
+        #[arg(long)]
+        use_mic: bool,
+    },
 }
 
 #[tokio::main]
@@ -90,7 +101,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Send { text } => cmd_send(&bus, &text).await,
-        Command::Listen => cmd_listen(bus).await,
+        Command::Listen { use_mic } => cmd_listen(bus, use_mic).await,
     }
 }
 
@@ -123,33 +134,70 @@ async fn cmd_send(bus: &Bus, text: &str) -> Result<()> {
     Ok(())
 }
 
-/// `listen` — full pipeline with stub stages.
+/// `listen` — full pipeline.
 ///
-/// Today's stack (per ADR-0015 §"What this scaffold doesn't ship"):
-///   audio:  StubAudioSource (yields 0 frames)
-///   wake:   StubWakeDetector
-///   stt:    StubSpeechRecognizer
-///   parser: RuleIntentParser
-///   sink:   NatsIntentSink (real broker publish)
+/// Two audio paths:
 ///
-/// The pipeline returns immediately because the stub audio source
-/// is empty. The daemon prints a one-line "no real audio yet"
-/// notice and exits cleanly, rather than spinning a no-op loop.
-/// Real impls land in M5b W4+.
-async fn cmd_listen(bus: Bus) -> Result<()> {
-    warn!(
-        "iot-voice listen: stub stages only — no real audio capture yet. \
-         Use `iot-voice send <text>` for end-to-end bus testing today."
-    );
-    let audio = StubAudioSource::new(Vec::new());
+/// * `--use-mic` (requires the `mic` cargo feature, which pulls
+///   in `iot-voice/cpal`): real default-input capture. Loops
+///   forever, dropping frames into the wake detector.
+/// * default: `StubAudioSource` yielding 0 frames. Pipeline
+///   returns immediately. Useful for "did the bus connect?".
+///
+/// Wake / STT / TTS stages stay stub today regardless of audio
+/// path — real impls land in M5b W4b/W4c.
+async fn cmd_listen(bus: Bus, use_mic: bool) -> Result<()> {
     let wake = StubWakeDetector::default();
     let stt = StubSpeechRecognizer::new("(stub stt has no audio to transcribe)");
     let parser = RuleIntentParser::new();
     let sink = NatsIntentSink::new(bus);
+
+    if use_mic {
+        run_with_mic(wake, stt, parser, sink).await
+    } else {
+        warn!(
+            "iot-voice listen: stub audio (no --use-mic). \
+             Use `iot-voice send <text>` for end-to-end bus testing today, \
+             or rebuild with `--features mic` and rerun with `--use-mic`."
+        );
+        let audio = StubAudioSource::new(Vec::new());
+        let mut pipeline = Pipeline::new(audio, wake, stt, parser, Arc::new(sink));
+        pipeline.run().await.context("pipeline run")?;
+        info!("pipeline ended (stub source exhausted)");
+        Ok(())
+    }
+}
+
+#[cfg(feature = "mic")]
+async fn run_with_mic(
+    wake: StubWakeDetector,
+    stt: StubSpeechRecognizer,
+    parser: RuleIntentParser,
+    sink: NatsIntentSink,
+) -> Result<()> {
+    use iot_voice::CpalAudioSource;
+    info!("starting cpal audio capture; speak after startup");
+    let audio = CpalAudioSource::start().context("open default input device")?;
     let mut pipeline = Pipeline::new(audio, wake, stt, parser, Arc::new(sink));
     pipeline.run().await.context("pipeline run")?;
-    info!("pipeline ended (stub source exhausted)");
+    info!("pipeline ended");
     Ok(())
+}
+
+#[cfg(not(feature = "mic"))]
+// Same async signature as the `mic` arm so the call site is
+// uniform — the await on the bail-fast path costs nothing.
+#[allow(clippy::unused_async)]
+async fn run_with_mic(
+    _wake: StubWakeDetector,
+    _stt: StubSpeechRecognizer,
+    _parser: RuleIntentParser,
+    _sink: NatsIntentSink,
+) -> Result<()> {
+    anyhow::bail!(
+        "binary built without --features mic; \
+         rebuild iot-voice-daemon with `cargo build -p iot-voice-daemon --features mic` to enable --use-mic"
+    )
 }
 
 #[cfg(test)]
@@ -181,6 +229,16 @@ mod tests {
             .try_get_matches_from(vec!["iot-voice", "listen"])
             .expect("parse `listen`");
         assert_eq!(m.subcommand_name(), Some("listen"));
+    }
+
+    #[test]
+    fn cli_parses_listen_with_use_mic() {
+        let m = Cli::command()
+            .try_get_matches_from(vec!["iot-voice", "listen", "--use-mic"])
+            .expect("parse `listen --use-mic`");
+        assert_eq!(m.subcommand_name(), Some("listen"));
+        let listen_m = m.subcommand_matches("listen").expect("listen subcommand");
+        assert!(listen_m.get_flag("use_mic"));
     }
 
     #[test]

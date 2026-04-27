@@ -15,6 +15,14 @@ workspace = true
 name = "iot-voice"
 path = "src/main.rs"
 
+[features]
+default = []
+# Activate `iot-voice/cpal` to enable real-mic capture. The
+# daemon's `listen --use-mic` flag refuses with a clear error
+# message when this feature isn't compiled in, instead of falling
+# back to the stub silently.
+mic = ["iot-voice/cpal"]
+
 [dependencies]
 # Library half: pure pipeline + traits + stub impls.
 iot-voice = { path = "../iot-voice" }

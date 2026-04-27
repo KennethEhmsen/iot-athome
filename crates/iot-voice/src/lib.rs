@@ -44,6 +44,8 @@
 #![forbid(unsafe_code)]
 
 pub mod audio;
+#[cfg(feature = "cpal")]
+pub mod cpal_audio;
 pub mod intent;
 pub mod pipeline;
 pub mod stt;
@@ -51,6 +53,8 @@ pub mod synth;
 pub mod wake;
 
 pub use audio::{AudioFrame, AudioSource, AudioSourceError, StubAudioSource};
+#[cfg(feature = "cpal")]
+pub use cpal_audio::CpalAudioSource;
 pub use intent::{
     Intent, IntentError, IntentParser, IntentSink, LogIntentSink, RuleIntentParser, StubIntentSink,
 };
