@@ -28,17 +28,41 @@ Plus Docker / Podman / OrbStack for the integration tests
 (testcontainers spins NATS, Mosquitto, Postgres + TimescaleDB
 images).
 
-## Windows: bash-PATH gotcha
+## Windows: skip `just`, use the PowerShell helper
 
 `just` runs each recipe through `bash -cu` (per `set shell` in the
-Justfile). On Windows, the bash that ships with Git for Windows
-doesn't inherit `%USERPROFILE%\.cargo\bin` from your PowerShell or
-cmd PATH unless you've added it to the **persistent user PATH**.
-Symptom: `just ci-local` fails with `cargo: command not found` /
-`typos: command not found` even though the tools work fine in
-PowerShell.
+Justfile). On Windows, that bash is either Git for Windows bash
+(`/c/...` paths) or WSL bash (`/mnt/c/...` paths) — and **neither
+reliably runs the Windows-side cargo binaries** the way PowerShell
+does. Git Bash needs `%USERPROFILE%\.cargo\bin` on its PATH (which
+isn't inherited from PowerShell unless you've made it persistent);
+WSL bash needs Win32 interop + the `.exe` suffix to find typos /
+cargo-nextest / cargo-deny.
 
-One-time fix from PowerShell:
+Sidestep the whole thing: use the PowerShell helper that does the
+same work without bash:
+
+```powershell
+.\tools\ci\ci-local.ps1            # full CI parity (typos + fmt + clippy + build + test + deny)
+.\tools\ci\ci-local.ps1 -Quick     # docs-only fast subset (typos + fmt-check, ~5 s)
+```
+
+The helper:
+
+* Verifies your prereqs (cargo, typos, cargo-deny, cargo-nextest)
+  and prints the exact `cargo install` command if anything's
+  missing.
+* Runs each step with a banner so you know what failed if anything
+  does.
+* Bails on first failure (no point running `cargo deny` if the
+  build is broken).
+
+Use `-Quick` for the equivalent of `just lint-fast` — typos +
+fmt-check only, ~5 s. Use no flag for the equivalent of
+`just ci-local` — full coverage, a few minutes.
+
+If you'd rather use `just ci-local` directly: add cargo bin to the
+**persistent user PATH** so Git Bash sees it. From PowerShell:
 
 ```powershell
 [Environment]::SetEnvironmentVariable(
@@ -48,8 +72,9 @@ One-time fix from PowerShell:
 )
 ```
 
-Close and reopen your shell. `just --list` should now find every
-recipe's tools.
+Close + reopen your shell. This works for Git Bash; WSL bash needs
+extra `.exe`-resolution config that's not worth the trouble — just
+use the PowerShell helper there.
 
 ## The day-to-day workflow
 
