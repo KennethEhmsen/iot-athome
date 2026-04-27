@@ -24,7 +24,13 @@
 
 use std::path::Path;
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::Result;
+// `Context` is needed by both arms (POSIX `with_context` + Windows
+// `with_context` on the icacls invocation). `bail` is Windows-only
+// — scoped inside that arm so the Linux build doesn't trip
+// `unused-imports` lint.
+#[cfg(any(unix, windows))]
+use anyhow::Context as _;
 
 /// Restrict `path` to be read/write-only by the current user.
 ///
@@ -52,6 +58,7 @@ fn restrict_inner(path: &Path) -> Result<()> {
 
 #[cfg(windows)]
 fn restrict_inner(path: &Path) -> Result<()> {
+    use anyhow::bail;
     // Derive the current user as DOMAIN\USER (or just USER on machines
     // without a domain). Windows guarantees USERNAME for any
     // interactive session and any service running under a non-SYSTEM
