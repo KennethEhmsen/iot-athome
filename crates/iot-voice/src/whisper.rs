@@ -107,9 +107,9 @@ impl WhisperRecognizer {
     /// from a different ggml version than the linked
     /// whisper.cpp).
     pub fn load(model_path: &Path) -> Result<Self, SttError> {
-        let path_str = model_path
-            .to_str()
-            .ok_or_else(|| SttError::Backend(format!("non-UTF-8 model path {model_path:?}")))?;
+        let path_str = model_path.to_str().ok_or_else(|| {
+            SttError::Backend(format!("non-UTF-8 model path {}", model_path.display()))
+        })?;
         info!(target: "iot_voice::whisper", path = %path_str, "loading whisper model");
         let ctx = WhisperContext::new_with_params(path_str, WhisperContextParameters::default())
             .map_err(|e| SttError::Backend(format!("whisper context: {e}")))?;
@@ -177,15 +177,23 @@ fn run_full(ctx: &WhisperContext, samples: &[f32], threads: i32) -> Result<Strin
         .full(params, samples)
         .map_err(|e| SttError::Backend(format!("whisper full: {e}")))?;
 
-    let n = state
-        .full_n_segments()
-        .map_err(|e| SttError::Backend(format!("whisper segments: {e}")))?;
+    // whisper-rs 0.16+ API: `full_n_segments()` returns `i32`
+    // directly (not Result-wrapped), and segments are accessed
+    // via `get_segment(i) -> Segment` with `to_str()` /
+    // `text()` rather than the 0.13-era flat
+    // `full_get_segment_text(i) -> Result<String>`. The new
+    // API is more idiomatic but the wrapper here just
+    // concatenates segment text — no metadata extraction.
+    let n = state.full_n_segments();
     let mut text = String::new();
     for i in 0..n {
         let seg = state
-            .full_get_segment_text(i)
-            .map_err(|e| SttError::Backend(format!("whisper segment {i}: {e}")))?;
-        text.push_str(&seg);
+            .get_segment(i)
+            .ok_or_else(|| SttError::Backend(format!("whisper segment {i} missing")))?;
+        let chunk = seg
+            .to_str_lossy()
+            .map_err(|e| SttError::Backend(format!("whisper segment {i} decode: {e}")))?;
+        text.push_str(&chunk);
     }
     debug!(
         target: "iot_voice::whisper",

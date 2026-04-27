@@ -63,10 +63,11 @@ cpal = { version = "0.15", optional = true }
 # Optional. See `[features].whisper` above. Wraps whisper.cpp
 # via cmake + bindgen. NOT pulled in on default builds; opt-in
 # via `--features whisper` or the daemon's `--features stt-whisper`.
-# 0.13 pinned because 0.14+ requires bindgen 0.70 which bumps
-# clang-sys requirements; revisit when the workspace clang-sys
-# transitively bumps anyway.
-whisper-rs = { version = "0.13", default-features = false, optional = true }
+# 0.14 because 0.13.2 + LLVM 22.x clang produces opaque
+# `whisper_full_params` (every field setter fails to compile);
+# 0.14 ships the bindgen 0.70+ tweaks that work against modern
+# clang. Verified locally with cmake 4.3 + clang 22.1.
+whisper-rs = { version = "0.16", default-features = false, optional = true }
 # Optional. See `[features].wake-phrase` above. Pure-Rust
 # wake-word detection. 3.x is the current line; the API takes
 # i16 samples (we convert from f32 in the adapter).
