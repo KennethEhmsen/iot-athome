@@ -143,7 +143,7 @@ sha2 = "0.10"
 nkeys = "0.4"
 
 # --- oidc / auth ---
-jsonwebtoken = { version = "9.3", default-features = false }
+jsonwebtoken = { version = "10", default-features = false, features = ["use_pem"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
 # --- serde / ids / time ---
@@ -190,7 +190,7 @@ cel-interpreter = "0.10"
 
 # --- testing ---
 tokio-test = "0.4"
-testcontainers = "0.23"
+testcontainers = "0.27"
 insta = "1.41"
 rstest = "0.23"
 

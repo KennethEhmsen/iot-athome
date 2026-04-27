@@ -48,10 +48,6 @@ version = 2
 # Allow-listed advisories come with a justification + revisit expectation.
 # Keep the list short — anything here should be revisited quarterly.
 ignore = [
-  # tokio-tar PAX header smuggling. Transitive via testcontainers only;
-  # dev-time dependency not shipped in production binaries.
-  # Revisit: when testcontainers bumps past the vulnerable dep.
-  "RUSTSEC-2025-0111",
   # fxhash — unmaintained, transitive via sqlx / testcontainers.
   # No security implication; dropping when dependents move to rustc-hash.
   "RUSTSEC-2025-0057",
