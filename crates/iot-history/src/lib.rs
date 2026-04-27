@@ -253,6 +253,45 @@ impl HistoryStore {
             .map_err(HistoryError::Query)?;
         Ok(result.rows_affected())
     }
+
+    /// Drop rows for a single device, optionally constrained to a
+    /// time cutoff. Underpins the M6 W2 `iotctl history prune` CLI
+    /// surface that ETSI EN 303 645 §5.11 ("Make it easy for users
+    /// to delete user data") asks for.
+    ///
+    /// Filters compose AND-wise:
+    /// * `device_id` is required — refuses to delete the whole
+    ///   table by accident; callers wanting full-table prune use
+    ///   [`Self::prune_older_than`] explicitly.
+    /// * `cutoff` is optional — when `None`, every row for the
+    ///   device is removed; when `Some`, only rows older than the
+    ///   cutoff.
+    ///
+    /// Returns rows deleted. The CLI prints this as a confirmation
+    /// to the operator.
+    ///
+    /// # Errors
+    /// `Query` on db failure.
+    pub async fn prune_for_device(
+        &self,
+        device_id: &str,
+        cutoff: Option<DateTime<Utc>>,
+    ) -> Result<u64, HistoryError> {
+        let result = if let Some(cutoff) = cutoff {
+            sqlx::query("DELETE FROM entity_state_history WHERE device_id = $1 AND ts < $2")
+                .bind(device_id)
+                .bind(cutoff)
+                .execute(&self.pool)
+                .await
+        } else {
+            sqlx::query("DELETE FROM entity_state_history WHERE device_id = $1")
+                .bind(device_id)
+                .execute(&self.pool)
+                .await
+        };
+        let result = result.map_err(HistoryError::Query)?;
+        Ok(result.rows_affected())
+    }
 }
 
 /// Build a [`HistoryStore`] from the conventional env vars. Returns

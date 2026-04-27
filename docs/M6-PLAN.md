@@ -121,11 +121,21 @@ Provisions targeted:
   enforcement + CEL source size cap + intent grammar rejection.
 
 Open W2 deliverables (the rows that need NEW evidence):
-* `docs/security/cert-rotation-test.md` + an integration test that
-  rotates the dev CA mid-run and asserts client reconnects.
-* `iotctl history prune --device-id <id>` subcommand.
-* `iotctl history prune --before <rfc3339>` (already exists?
-  audit during W2; if not, ship).
+* [ ] `docs/security/cert-rotation-test.md` + an integration test
+  that rotates the dev CA mid-run and asserts client reconnects.
+  **Deferred to M6 W2.5** — testcontainers + cert ops is its
+  own session.
+* [x] `iotctl history prune --device-id <id>` subcommand. ✅
+  Shipped W2.
+* [x] `iotctl history prune --before <rfc3339>` flag. ✅ Shipped
+  W2 (didn't previously exist; checked the codebase, no `history`
+  subcommand at all). Both filters compose AND-wise via
+  `prune_for_device(device_id, cutoff: Option)` on the
+  underlying `HistoryStore`.
+* [x] `docs/security/etsi-303-645.md` — 13-row evidence table
+  with provision-by-provision citations, coverage summary
+  (11 C, 2 P, 0 O, 0 N/A), and a reverse-traceability map.
+  ✅ Shipped W2.
 
 ### W3 — OWASP ASVS L2 verification
 

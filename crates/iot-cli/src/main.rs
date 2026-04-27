@@ -20,6 +20,7 @@
 //! * `iotctl mosquitto regen-acl`: regenerate the Mosquitto ACL file
 //!   from the union of installed plugins' MQTT capabilities (M5a W3).
 
+mod history;
 mod mosquitto;
 mod nats;
 mod plugin;
@@ -79,6 +80,12 @@ enum Command {
     /// rebuilding the broker ACL from installed-plugin manifests.
     #[command(subcommand)]
     Mosquitto(mosquitto::MosquittoCmd),
+    /// Long-term history maintenance (M6 W2) — `prune` deletes
+    /// rows from the optional TimescaleDB-backed
+    /// `entity_state_history` table by device-id and/or time
+    /// cutoff. ETSI EN 303 645 §5.11 deliverable.
+    #[command(subcommand)]
+    History(history::HistoryCmd),
 }
 
 #[derive(Debug, Subcommand)]
@@ -135,6 +142,7 @@ async fn main() -> Result<()> {
         Command::Rule(sub) => rule::run(sub),
         Command::Nats(sub) => nats::run(sub),
         Command::Mosquitto(sub) => mosquitto::run(sub),
+        Command::History(sub) => history::run(sub).await,
     };
 
     iot_observability::shutdown();
