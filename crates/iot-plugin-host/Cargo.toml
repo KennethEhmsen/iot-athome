@@ -25,6 +25,10 @@ iot-observability = { path = "../iot-observability" }
 
 anyhow.workspace = true
 async-trait.workspace = true
+# Refresh task on `nats.creds` needs to re-load the account seed and
+# re-derive user keypairs from the per-plugin nkey seeds so it can
+# re-mint user JWTs against the same identity (Bucket 1 audit H1).
+nkeys.workspace = true
 # Host owns the one MQTT broker connection per process and fans out
 # inbound messages to plugins via MqttRouter. See ADR-0013.
 rumqttc.workspace = true

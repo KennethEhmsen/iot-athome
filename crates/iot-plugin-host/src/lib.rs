@@ -9,6 +9,7 @@
 
 pub mod capabilities;
 pub mod component;
+pub mod creds_refresh;
 pub mod manifest;
 pub mod mqtt;
 pub mod mqtt_acl;
@@ -42,10 +43,45 @@ pub struct Config {
     /// (the capability check still enforces). See ADR-0013.
     #[serde(default)]
     pub mqtt: Option<crate::mqtt::MqttBrokerConfig>,
+    /// Account seed used by the host-side refresh task to re-mint
+    /// per-plugin user JWTs as they approach expiry (Bucket 1 audit
+    /// H1). Set this to the same path `iotctl plugin install`'s
+    /// `--account-seed` / `IOT_NATS_ACCOUNT_SEED` points at —
+    /// typically `tools/devcerts/generated/nats/iot-account.nk`.
+    /// When unset the host runs without rotation; per-plugin creds
+    /// stay valid for whatever validity window the install used.
+    #[serde(default)]
+    pub nats_account_seed: Option<String>,
+    /// Validity window applied to *re-minted* JWTs (seconds). Default
+    /// 24 h. Unrelated to the install-time `--validity-seconds` —
+    /// each refresh stamps `exp = now + this_value` so a host with
+    /// shorter rotation than the operator originally set tightens up
+    /// over time.
+    #[serde(default = "default_creds_validity")]
+    pub nats_creds_validity_seconds: u64,
+    /// Refresh threshold (seconds before expiry). Default 1 h —
+    /// matches the audit memo's "within 1 h of expiry" trigger.
+    #[serde(default = "default_creds_refresh_threshold")]
+    pub nats_creds_refresh_threshold_seconds: u64,
+    /// Poll interval for the refresh scan (seconds). Default 60 s.
+    #[serde(default = "default_creds_refresh_poll")]
+    pub nats_creds_refresh_poll_seconds: u64,
 }
 
 fn default_plugin_dir() -> String {
     "/var/lib/iotathome/plugins".into()
+}
+
+fn default_creds_validity() -> u64 {
+    86_400
+}
+
+fn default_creds_refresh_threshold() -> u64 {
+    3_600
+}
+
+fn default_creds_refresh_poll() -> u64 {
+    60
 }
 
 /// Runtime bindings the host feeds into every loaded plugin. All are
@@ -296,10 +332,38 @@ pub async fn run(cfg: Config) -> Result<()> {
         }));
     }
 
+    // Creds-refresh poller. Runs only when the operator has wired up
+    // an account seed — otherwise the install-time creds carry their
+    // validity window and rotate via re-install.
+    let refresh_handle = cfg.nats_account_seed.as_ref().map(|seed| {
+        let cfg_refresh = crate::creds_refresh::RefreshConfig {
+            account_seed_path: PathBuf::from(seed),
+            validity_seconds: cfg.nats_creds_validity_seconds,
+            refresh_threshold_seconds: cfg.nats_creds_refresh_threshold_seconds,
+            poll_interval: std::time::Duration::from_secs(cfg.nats_creds_refresh_poll_seconds),
+        };
+        let plugin_root = PathBuf::from(&cfg.plugin_dir);
+        info!(
+            account_seed = %seed,
+            "spawning nats.creds refresh poller"
+        );
+        tokio::spawn(async move {
+            if let Err(e) = crate::creds_refresh::run_refresh_loop(plugin_root, cfg_refresh).await {
+                tracing::error!(
+                    error = %format!("{e:#}"),
+                    "creds-refresh loop exited with error"
+                );
+            }
+        })
+    });
+
     tokio::signal::ctrl_c().await?;
     info!("iot-plugin-host shutting down");
     for task in supervisor_tasks {
         task.abort();
+    }
+    if let Some(h) = refresh_handle {
+        h.abort();
     }
     Ok(())
 }

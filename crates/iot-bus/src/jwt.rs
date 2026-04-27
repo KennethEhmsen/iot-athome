@@ -46,6 +46,12 @@ pub enum JwtError {
     Malformed(&'static str),
     #[error("base64: {0}")]
     Base64(#[from] base64::DecodeError),
+    /// User JWT's `exp` claim is in the past relative to `now`. Bucket
+    /// 1 audit H1 closure — pre-fix, leaked `nats.creds` files were
+    /// usable for the lifetime of the account keypair. The minter now
+    /// always populates `exp`; verifiers reject expired tokens.
+    #[error("JWT expired (exp={exp}, now={now})")]
+    Expired { now: u64, exp: u64 },
 }
 
 impl From<nkeys::error::Error> for JwtError {
@@ -68,6 +74,10 @@ pub struct UserAcl {
 
 /// NATS user-claims payload. Only the fields we actually populate —
 /// NATS tolerates unknown fields + missing optional fields.
+///
+/// `exp` and `jti` are serialised only when non-default so JWTs minted
+/// by older builds (no expiry, no revocation id) still round-trip cleanly
+/// through [`verify_user_jwt`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserClaims {
     /// Issuer (account or operator public key — `A…` / `O…` encoding).
@@ -76,10 +86,28 @@ pub struct UserClaims {
     pub sub: String,
     /// Issued-at unix seconds.
     pub iat: u64,
+    /// Expiry as unix seconds. `0` = no expiry (legacy / pre-Bucket-1
+    /// path). Always populated by [`issue_user_jwt`] going forward.
+    /// NATS server enforces this on connect; [`verify_user_jwt`]
+    /// enforces locally so the host can reject stale creds before
+    /// even attempting to authenticate.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub exp: u64,
+    /// Random JWT ID. Sets up the revocation-list option a future ADR
+    /// will define — every JWT carries a unique handle so a CRL-style
+    /// store can deny a single token without rotating the issuing
+    /// account key. Empty = legacy.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub jti: String,
     /// Human-readable name (plugin id, user name, …).
     pub name: String,
     /// NATS-specific claim block.
     pub nats: UserNatsClaims,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(x: &u64) -> bool {
+    *x == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -199,6 +227,13 @@ impl Default for AccountLimits {
 ///   wrote).
 /// * `iat` — issued-at as unix seconds. Caller provides so tests
 ///   can pin timestamps.
+/// * `exp` — expiry as unix seconds. `0` skips the claim (legacy
+///   no-expiry behaviour, kept on the API for the operator/account
+///   trust-root path which still rotates only via destructive
+///   `iotctl nats bootstrap --force`). Real plugin creds always set
+///   this — see Bucket 1 audit H1.
+/// * `jti` — random JWT id, used as the revocation-list handle if
+///   one is later added. Empty = skip the claim.
 ///
 /// # Errors
 /// Serialisation of the payload, or signing failure from the nkeys
@@ -209,11 +244,15 @@ pub fn issue_user_jwt(
     name: &str,
     acl: &UserAcl,
     iat: u64,
+    exp: u64,
+    jti: &str,
 ) -> Result<String, JwtError> {
     let claims = UserClaims {
         iss: issuer.public_key(),
         sub: subject_public.to_owned(),
         iat,
+        exp,
+        jti: jti.to_owned(),
         name: name.to_owned(),
         nats: UserNatsClaims {
             publish: Permissions {
@@ -364,11 +403,24 @@ pub fn verify_account_jwt(
 /// Parse + verify a user JWT against `issuer`'s public key. Returns
 /// the claims on success.
 ///
+/// `now` is the unix-seconds wall-clock used for the `exp` check.
+/// Tokens with `exp == 0` (legacy / pre-Bucket-1 mints) are accepted
+/// regardless — that lane is documented as "no expiry" by the NATS v2
+/// spec and we stay compatible with already-on-disk creds. Tokens
+/// with a non-zero `exp` are rejected with [`JwtError::Expired`] when
+/// `now >= exp`. Pass `0` to skip the freshness check entirely (used
+/// by tests that only care about signature validity).
+///
 /// # Errors
 /// `BadSignature` when the signature doesn't verify under `issuer`;
+/// `Expired` when the JWT's `exp` is in the past relative to `now`;
 /// `Malformed` for the wrong number of `.`-segments; `Json` /
 /// `Base64` for payload decode errors.
-pub fn verify_user_jwt(issuer: &nkeys::KeyPair, token: &str) -> Result<UserClaims, JwtError> {
+pub fn verify_user_jwt(
+    issuer: &nkeys::KeyPair,
+    token: &str,
+    now: u64,
+) -> Result<UserClaims, JwtError> {
     let mut segs = token.split('.');
     let header_b64 = segs.next().ok_or(JwtError::Malformed("missing header"))?;
     let payload_b64 = segs.next().ok_or(JwtError::Malformed("missing payload"))?;
@@ -387,11 +439,19 @@ pub fn verify_user_jwt(issuer: &nkeys::KeyPair, token: &str) -> Result<UserClaim
 
     let payload = B64URL.decode(payload_b64)?;
     let claims: UserClaims = serde_json::from_slice(&payload)?;
+    // Freshness check. `now == 0` is the test-only escape hatch — real
+    // callers pass `SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()`.
+    if claims.exp != 0 && now != 0 && now >= claims.exp {
+        return Err(JwtError::Expired {
+            now,
+            exp: claims.exp,
+        });
+    }
     Ok(claims)
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -401,6 +461,10 @@ mod tests {
             allow_sub: vec!["cmd.demo-echo.>".into()],
         }
     }
+
+    const IAT: u64 = 1_700_000_000;
+    const EXP: u64 = 1_700_086_400; // IAT + 24 h
+    const JTI: &str = "01HV5Z3M9G7Q8P3N5K6X7Y8Z9A";
 
     #[test]
     fn jwt_roundtrip_verifies() {
@@ -412,15 +476,19 @@ mod tests {
             &user.public_key(),
             "demo-echo",
             &fixed_acl(),
-            1_700_000_000,
+            IAT,
+            EXP,
+            JTI,
         )
         .expect("issue");
 
-        let claims = verify_user_jwt(&account, &token).expect("verify");
+        let claims = verify_user_jwt(&account, &token, IAT + 60).expect("verify");
         assert_eq!(claims.iss, account.public_key());
         assert_eq!(claims.sub, user.public_key());
         assert_eq!(claims.name, "demo-echo");
-        assert_eq!(claims.iat, 1_700_000_000);
+        assert_eq!(claims.iat, IAT);
+        assert_eq!(claims.exp, EXP);
+        assert_eq!(claims.jti, JTI);
         assert_eq!(claims.nats.type_, "user");
         assert_eq!(claims.nats.version, 2);
         assert_eq!(claims.nats.publish.allow, vec!["device.demo-echo.>"]);
@@ -438,11 +506,13 @@ mod tests {
             &user.public_key(),
             "demo-echo",
             &fixed_acl(),
-            1_700_000_000,
+            IAT,
+            EXP,
+            JTI,
         )
         .unwrap();
 
-        let err = verify_user_jwt(&impostor, &token).unwrap_err();
+        let err = verify_user_jwt(&impostor, &token, IAT + 60).unwrap_err();
         assert!(matches!(err, JwtError::BadSignature), "{err:?}");
     }
 
@@ -451,19 +521,110 @@ mod tests {
         let account = nkeys::KeyPair::new_account();
         // Missing signature segment.
         assert!(matches!(
-            verify_user_jwt(&account, "eyJhbGci.eyJpc3Mi"),
+            verify_user_jwt(&account, "eyJhbGci.eyJpc3Mi", 0),
             Err(JwtError::Malformed(_))
         ));
         // Missing payload segment.
         assert!(matches!(
-            verify_user_jwt(&account, "eyJhbGci"),
+            verify_user_jwt(&account, "eyJhbGci", 0),
             Err(JwtError::Malformed(_))
         ));
         // Empty string.
         assert!(matches!(
-            verify_user_jwt(&account, ""),
+            verify_user_jwt(&account, "", 0),
             Err(JwtError::Malformed(_))
         ));
+    }
+
+    #[test]
+    fn expired_jwt_rejected() {
+        // exp at IAT + 24h; verify a second past that → Expired.
+        let account = nkeys::KeyPair::new_account();
+        let user = nkeys::KeyPair::new_user();
+        let token = issue_user_jwt(
+            &account,
+            &user.public_key(),
+            "demo-echo",
+            &fixed_acl(),
+            IAT,
+            EXP,
+            JTI,
+        )
+        .unwrap();
+
+        let err = verify_user_jwt(&account, &token, EXP).unwrap_err();
+        match err {
+            JwtError::Expired { now, exp } => {
+                assert_eq!(now, EXP);
+                assert_eq!(exp, EXP);
+            }
+            other => panic!("expected Expired, got {other:?}"),
+        }
+
+        // And one second further — same outcome, different `now`.
+        let err2 = verify_user_jwt(&account, &token, EXP + 1).unwrap_err();
+        assert!(matches!(err2, JwtError::Expired { .. }));
+    }
+
+    #[test]
+    fn pre_expiry_jwt_accepted() {
+        // Right up to the second before exp the token verifies.
+        let account = nkeys::KeyPair::new_account();
+        let user = nkeys::KeyPair::new_user();
+        let token = issue_user_jwt(
+            &account,
+            &user.public_key(),
+            "demo-echo",
+            &fixed_acl(),
+            IAT,
+            EXP,
+            JTI,
+        )
+        .unwrap();
+        // exp - 1 is still inside the window.
+        let claims = verify_user_jwt(&account, &token, EXP - 1).expect("not yet expired");
+        assert_eq!(claims.exp, EXP);
+    }
+
+    #[test]
+    fn legacy_no_exp_jwt_accepted() {
+        // exp == 0 means "no expiry"; verify still succeeds at any
+        // wall-clock — keeps already-on-disk creds from older builds
+        // valid through the upgrade.
+        let account = nkeys::KeyPair::new_account();
+        let user = nkeys::KeyPair::new_user();
+        let token = issue_user_jwt(
+            &account,
+            &user.public_key(),
+            "demo-echo",
+            &fixed_acl(),
+            IAT,
+            0,
+            "",
+        )
+        .unwrap();
+        let claims = verify_user_jwt(&account, &token, 9_999_999_999).expect("no-exp accepts");
+        assert_eq!(claims.exp, 0);
+        assert_eq!(claims.jti, "");
+    }
+
+    #[test]
+    fn jti_roundtrips_through_serde() {
+        let account = nkeys::KeyPair::new_account();
+        let user = nkeys::KeyPair::new_user();
+        let jti = "01HV5Z3M9G7Q8P3N5K6X7Y8Z9B";
+        let token = issue_user_jwt(
+            &account,
+            &user.public_key(),
+            "demo-echo",
+            &fixed_acl(),
+            IAT,
+            EXP,
+            jti,
+        )
+        .unwrap();
+        let claims = verify_user_jwt(&account, &token, IAT).expect("verify");
+        assert_eq!(claims.jti, jti);
     }
 
     #[test]
@@ -535,7 +696,7 @@ mod tests {
             &account.public_key(),
             "IOT",
             AccountLimits::default(),
-            1_700_000_000,
+            IAT,
         )
         .expect("account issue");
         verify_account_jwt(&operator, &account_jwt).expect("account verify");
@@ -545,15 +706,17 @@ mod tests {
             &user.public_key(),
             "demo-echo",
             &fixed_acl(),
-            1_700_000_000,
+            IAT,
+            EXP,
+            JTI,
         )
         .expect("user issue");
-        verify_user_jwt(&account, &user_jwt).expect("user verify");
+        verify_user_jwt(&account, &user_jwt, IAT + 60).expect("user verify");
 
         // A user JWT minted by the account should NOT verify under the
         // operator — isolation between the two trust tiers.
         assert!(matches!(
-            verify_user_jwt(&operator, &user_jwt),
+            verify_user_jwt(&operator, &user_jwt, IAT + 60),
             Err(JwtError::BadSignature)
         ));
     }
@@ -567,6 +730,8 @@ mod tests {
             iss: "AACME".into(),
             sub: "UUSR".into(),
             iat: 1,
+            exp: 86_401,
+            jti: "01HV5Z3M9G7Q8P3N5K6X7Y8Z9C".into(),
             name: "x".into(),
             nats: UserNatsClaims {
                 publish: Permissions {
@@ -582,5 +747,20 @@ mod tests {
         assert!(s.contains(r#""pub":{"allow":["a.>"]}"#));
         assert!(s.contains(r#""type":"user""#));
         assert!(s.contains(r#""version":2"#));
+        assert!(s.contains(r#""exp":86401"#));
+        assert!(s.contains(r#""jti":"01HV5Z3M9G7Q8P3N5K6X7Y8Z9C""#));
+
+        // exp == 0 + jti == "" stay off the wire (legacy compat).
+        let legacy = UserClaims {
+            exp: 0,
+            jti: String::new(),
+            ..claims
+        };
+        let s2 = serde_json::to_string(&legacy).unwrap();
+        assert!(!s2.contains(r#""exp""#), "exp=0 must not serialize: {s2}");
+        assert!(
+            !s2.contains(r#""jti""#),
+            "empty jti must not serialize: {s2}"
+        );
     }
 }

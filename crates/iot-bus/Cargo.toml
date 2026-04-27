@@ -31,7 +31,13 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tracing.workspace = true
+# Random `jti` claim on user JWTs so the revocation-list ADR (queued)
+# has something to key off when it lands. ULIDs are sortable + unique
+# enough for the single-host model — see Bucket 1 audit H1 fix.
+ulid.workspace = true
 
 [dev-dependencies]
 testcontainers.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+# `creds.rs` unit tests scaffold per-plugin install dirs in tmpdirs.
+tempfile = "3.14"

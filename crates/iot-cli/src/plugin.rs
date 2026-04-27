@@ -32,9 +32,12 @@ use p256::ecdsa::signature::Verifier as _;
 use p256::ecdsa::{Signature, VerifyingKey};
 use p256::pkcs8::{DecodePublicKey as _, EncodePublicKey as _};
 
+use iot_bus::creds;
 use iot_plugin_host::capabilities::CapabilityMap;
 use iot_plugin_host::manifest::Manifest;
 use iot_plugin_host::supervisor;
+
+use crate::nats::DEFAULT_VALIDITY_SECONDS;
 
 /// Default install root. Kept in sync with `iot_plugin_host::Config`'s own
 /// default so `iotctl plugin install` writes to the same place the host
@@ -88,6 +91,14 @@ pub enum PluginCmd {
         /// falls back to mTLS-only — the pre-M5a dev path.
         #[arg(long, env = "IOT_NATS_ACCOUNT_SEED")]
         account_seed: Option<PathBuf>,
+        /// Validity window of the minted user JWT, in seconds.
+        /// Default 24 h (86400). Bucket 1 audit H1: leaked
+        /// `nats.creds` files are now valid for this window only;
+        /// the host's refresh task re-mints when within 1 h of
+        /// expiry. Operators with tighter rotation policies can
+        /// shrink this.
+        #[arg(long, env = "IOT_NATS_CREDS_VALIDITY", default_value_t = DEFAULT_VALIDITY_SECONDS)]
+        validity_seconds: u64,
     },
     /// List installed plugins and their declared capabilities.
     List {
@@ -127,6 +138,7 @@ pub fn run(cmd: &PluginCmd) -> Result<()> {
             allow_vulnerabilities,
             force,
             account_seed,
+            validity_seconds,
         } => install(
             path,
             plugin_dir,
@@ -135,6 +147,7 @@ pub fn run(cmd: &PluginCmd) -> Result<()> {
             *allow_vulnerabilities,
             *force,
             account_seed.as_deref(),
+            *validity_seconds,
         ),
         PluginCmd::List {
             plugin_dir,
@@ -236,6 +249,7 @@ fn enforce_sbom_policy(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn install(
     src: &Path,
     plugin_dir: &Path,
@@ -244,6 +258,7 @@ fn install(
     allow_vulnerabilities: bool,
     force: bool,
     account_seed: Option<&Path>,
+    validity_seconds: u64,
 ) -> Result<()> {
     // 1. Parse + schema-check the manifest via the runtime's own parser.
     let manifest_path = src.join("manifest.yaml");
@@ -311,7 +326,7 @@ fn install(
     //    the M5a W1 broker-decentralized-auth path; without an
     //    account seed we leave the runtime to fall back to mTLS-only.
     if let Some(seed_path) = account_seed {
-        mint_creds_post_install(&dest, &manifest.id, seed_path)
+        mint_creds_post_install(&dest, &manifest.id, seed_path, validity_seconds)
             .context("mint per-plugin nats.creds")?;
     } else {
         tracing::info!(
@@ -330,36 +345,39 @@ fn install(
 }
 
 /// Read the just-written `nats.nkey` + `acl.json`, mint a user JWT
-/// against the configured account seed, write a `.creds` file with
-/// 0600 perms.
+/// against the configured account seed, write a `.creds` file (0600
+/// on Unix) plus a `nats.creds.expiry` sidecar carrying the
+/// unix-seconds expiry timestamp. The host's refresh task polls the
+/// sidecar to decide when to re-mint without parsing the JWT body.
 ///
 /// Kept on the install path (vs. spawning `iotctl nats mint-user`)
 /// to avoid the fork/exec when both halves live in this binary.
-fn mint_creds_post_install(dest: &Path, plugin_id: &str, account_seed_path: &Path) -> Result<()> {
-    let user_seed_path = dest.join("nats.nkey");
-    let acl_path = dest.join("acl.json");
-    let creds_path = dest.join("nats.creds");
-
+fn mint_creds_post_install(
+    dest: &Path,
+    plugin_id: &str,
+    account_seed_path: &Path,
+    validity_seconds: u64,
+) -> Result<()> {
     let account_seed = fs::read_to_string(account_seed_path)
         .with_context(|| format!("read account seed {}", account_seed_path.display()))?;
     let account = nkeys::KeyPair::from_seed(account_seed.trim())
         .map_err(|e| anyhow!("parse account seed: {e}"))?;
 
-    let user_seed = fs::read_to_string(&user_seed_path)
-        .with_context(|| format!("read {}", user_seed_path.display()))?;
-    let user =
-        nkeys::KeyPair::from_seed(user_seed.trim()).map_err(|e| anyhow!("parse user seed: {e}"))?;
-
-    let acl = crate::nats::parse_acl(&acl_path)?;
-    let creds = crate::nats::issue_and_format_creds(&account, &user, plugin_id, &acl)?;
-
-    fs::write(&creds_path, &creds).with_context(|| format!("write {}", creds_path.display()))?;
-    restrict_permissions(&creds_path)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let minted =
+        creds::mint_creds_for_install_dir(&account, dest, plugin_id, now, validity_seconds)
+            .map_err(|e| anyhow!("mint per-plugin nats.creds: {e}"))?;
+    creds::write_creds(dest, &minted)
+        .with_context(|| format!("write nats.creds + .expiry under {}", dest.display()))?;
 
     tracing::info!(
         plugin = %plugin_id,
-        creds = %creds_path.display(),
+        creds = %dest.join(creds::CREDS_FILE).display(),
         account = %account.public_key(),
+        exp = minted.exp,
+        jti = %minted.jti,
         "minted nats.creds"
     );
     Ok(())
@@ -790,7 +808,16 @@ capabilities:
         trust_pub: Option<&Path>,
         force: bool,
     ) -> Result<()> {
-        install(src, dest, trust_pub, true, false, force, None)
+        install(
+            src,
+            dest,
+            trust_pub,
+            true,
+            false,
+            force,
+            None,
+            DEFAULT_VALIDITY_SECONDS,
+        )
     }
 
     #[test]
@@ -807,6 +834,7 @@ capabilities:
             false,
             false,
             None,
+            DEFAULT_VALIDITY_SECONDS,
         )
         .unwrap_err();
         let msg = format!("{err:#}");
@@ -848,6 +876,7 @@ capabilities:
             false,
             false,
             None,
+            DEFAULT_VALIDITY_SECONDS,
         )
         .expect("install signed");
 
@@ -875,6 +904,7 @@ capabilities:
             false,
             false,
             None,
+            DEFAULT_VALIDITY_SECONDS,
         )
         .unwrap_err();
         let msg = format!("{err:#}");
@@ -885,7 +915,7 @@ capabilities:
     }
 
     #[test]
-    fn install_writes_creds_when_account_seed_set() {
+    fn install_writes_creds_and_expiry_sidecar_when_account_seed_set() {
         let staging = tempfile::tempdir().unwrap();
         let installed = tempfile::tempdir().unwrap();
         write_staging(staging.path(), DEMO_MANIFEST, FAKE_WASM);
@@ -906,30 +936,48 @@ capabilities:
             false,
             false,
             Some(&seed_path),
+            7_200, // 2h validity for this test
         )
         .expect("install with creds mint");
 
         let dest = installed.path().join("test-plugin");
         let creds_path = dest.join("nats.creds");
+        let expiry_path = dest.join("nats.creds.expiry");
         assert!(
             creds_path.is_file(),
             "expected nats.creds at {creds_path:?}"
         );
+        assert!(
+            expiry_path.is_file(),
+            "expected nats.creds.expiry at {expiry_path:?}"
+        );
 
-        let creds = fs::read_to_string(&creds_path).unwrap();
-        assert!(creds.contains("-----BEGIN NATS USER JWT-----"));
-        assert!(creds.contains("-----BEGIN USER NKEY SEED-----"));
+        let creds_text = fs::read_to_string(&creds_path).unwrap();
+        assert!(creds_text.contains("-----BEGIN NATS USER JWT-----"));
+        assert!(creds_text.contains("-----BEGIN USER NKEY SEED-----"));
 
-        // The minted user JWT verifies under the account that signed it.
-        let jwt_start = creds.find("-----BEGIN NATS USER JWT-----\n").unwrap()
+        // The minted user JWT verifies under the account that signed it…
+        let jwt_start = creds_text.find("-----BEGIN NATS USER JWT-----\n").unwrap()
             + "-----BEGIN NATS USER JWT-----\n".len();
-        let jwt_end = creds.find("\n------END NATS USER JWT------").unwrap();
-        let jwt = &creds[jwt_start..jwt_end];
-        let claims = iot_bus::jwt::verify_user_jwt(&account, jwt).expect("verify");
+        let jwt_end = creds_text.find("\n------END NATS USER JWT------").unwrap();
+        let jwt = &creds_text[jwt_start..jwt_end];
+        // `now == 0` skips the freshness check — we only care about
+        // signature + claim shape here.
+        let claims = iot_bus::jwt::verify_user_jwt(&account, jwt, 0).expect("verify");
         assert_eq!(claims.name, "test-plugin");
+        assert_eq!(claims.jti.len(), 26, "ULID jti");
+        // …and the sidecar carries the same expiry the JWT does.
+        let expiry: u64 = fs::read_to_string(&expiry_path)
+            .unwrap()
+            .trim()
+            .parse()
+            .expect("expiry is integer");
+        assert_eq!(claims.exp, expiry);
+        assert_eq!(claims.exp - claims.iat, 7_200);
+
         // And NOT under the operator — different trust tier.
         assert!(matches!(
-            iot_bus::jwt::verify_user_jwt(&operator, jwt),
+            iot_bus::jwt::verify_user_jwt(&operator, jwt, 0),
             Err(iot_bus::jwt::JwtError::BadSignature)
         ));
     }
@@ -1043,6 +1091,7 @@ capabilities:
             true,
             false,
             None,
+            DEFAULT_VALIDITY_SECONDS,
         )
         .expect("install");
         let dest = installed.path().join("test-plugin");
@@ -1110,6 +1159,7 @@ capabilities:
             false,
             false,
             None,
+            DEFAULT_VALIDITY_SECONDS,
         )
         .unwrap();
 
@@ -1136,6 +1186,7 @@ capabilities:
             false,
             false,
             None,
+            DEFAULT_VALIDITY_SECONDS,
         )
         .unwrap();
 
@@ -1166,6 +1217,7 @@ capabilities:
             false,
             false,
             None,
+            DEFAULT_VALIDITY_SECONDS,
         )
         .unwrap();
 

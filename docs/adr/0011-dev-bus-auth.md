@@ -69,3 +69,16 @@ The retirement landed in **M5a W1** (post-`v0.4.0-m4`), later than the originall
 The post-supersession dev path is therefore: `mint.sh` produces both mTLS bundle + JWT trust root → `just dev` boots the compose stack with the broker in operator-JWT mode → `iotctl plugin install` mints a per-plugin user JWT for each plugin → the runtime connects with mTLS + JWT.
 
 The two-step retirement (crypto then wiring) is reflected in the M5 plan's M5a/M5b split — a pattern the M4 retro flagged (don't ship "scaffolds claiming to be plugins") and one we deliberately repeated for honesty rather than backdating the ADR closure.
+
+### User JWT expiry + host-side rotation (Bucket 1 audit H1, post-`v0.5.0-m5a`)
+
+The first-cut M5a minter emitted user JWTs with no `exp` claim — leaked `nats.creds` files were valid for the lifetime of the issuing account keypair (months / years). The Bucket 1 audit closure adds:
+
+- `iot_bus::jwt::issue_user_jwt` always populates `exp = iat + validity_seconds` (default 24 h) and a random `jti` (ULID, sets up the option for a later revocation-list ADR without committing the impl yet).
+- `iot_bus::jwt::verify_user_jwt` enforces `exp` against a caller-supplied `now`. Tokens with `exp == 0` (already-on-disk legacy creds from the M5a path) keep verifying so the upgrade is non-breaking.
+- `iotctl nats mint-user --validity-seconds <N>` and `iotctl plugin install --validity-seconds <N>` (env: `IOT_NATS_CREDS_VALIDITY`) plumb the lifetime end-to-end. The install path writes a `nats.creds.expiry` sidecar carrying the unix-seconds expiry, so the host-side refresh poller can decide when to re-mint without parsing the JWT body.
+- `iot_plugin_host::creds_refresh` is a periodic task (default 60 s poll) that walks every plugin install dir, reads the expiry sidecar, and re-mints fresh creds (same nkey, same ACL, new JWT) when within 1 h of expiry. Configured via `nats_account_seed` in the host config; absent = no rotation, install-time validity holds. The refreshed file is rewritten in place; the plugin's next reconnect — organic from a broker-side eviction, or via the supervisor's restart loop — picks it up. There is no plugin-side "reload creds" signal yet (a future ABI question if and when expiry windows tighten enough that brokers evict before reconnect).
+
+**Operator/account JWT lifetime stays static.** The trust root the broker preloads from `resolver.conf` is rotated only via `iotctl nats bootstrap --force`, which is destructive (invalidates every previously-minted user JWT). That's the right behaviour for a single-host model: an automatic operator-key rotation on a box where the operator+account+broker all share the same machine buys nothing and trades reliable uptime for moving parts. Cluster-wide synchronised expiry windows are out of scope until there is a cluster.
+
+Distributed revocation (CRL-style) is also out of scope; the `jti` claim is the seam a future ADR can hook into when there's a real revocation event to handle. Until then, the rotation cadence + the destructive `bootstrap --force` are sufficient.

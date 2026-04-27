@@ -34,7 +34,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, bail, Context as _, Result};
 use clap::Subcommand;
 
-use iot_bus::jwt::{format_creds_file, issue_account_jwt, issue_user_jwt, AccountLimits, UserAcl};
+use iot_bus::creds;
+use iot_bus::jwt::{issue_account_jwt, AccountLimits};
+
+/// Default validity for a freshly-minted user JWT — 24 h. Bucket 1
+/// audit H1 closure: leaked `nats.creds` files now have a finite
+/// blast-radius window. Operators override per-mint via
+/// `--validity-seconds` (or the install hook's same-named flag).
+pub const DEFAULT_VALIDITY_SECONDS: u64 = 86_400;
 
 #[derive(Debug, Subcommand)]
 pub enum NatsCmd {
@@ -80,8 +87,16 @@ pub enum NatsCmd {
         #[arg(long)]
         name: String,
         /// Creds-file output path. Defaults to `<user_seed dir>/nats.creds`.
+        /// The unix-seconds expiry sidecar is always written next to
+        /// the creds file as `<creds-name>.expiry`.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Validity window of the resulting JWT, in seconds. Default
+        /// 24 h (86400). The host's refresh task re-mints when within
+        /// 1 h of expiry; operators with shorter rotation windows can
+        /// shrink this for tighter blast radius.
+        #[arg(long, default_value_t = DEFAULT_VALIDITY_SECONDS)]
+        validity_seconds: u64,
     },
 }
 
@@ -103,7 +118,15 @@ pub fn run(cmd: &NatsCmd) -> Result<()> {
             acl,
             name,
             out,
-        } => cmd_mint_user(account_seed, user_seed, acl, name, out.as_deref()),
+            validity_seconds,
+        } => cmd_mint_user(
+            account_seed,
+            user_seed,
+            acl,
+            name,
+            out.as_deref(),
+            *validity_seconds,
+        ),
     }
 }
 
@@ -200,6 +223,7 @@ fn cmd_mint_user(
     acl_path: &Path,
     name: &str,
     out: Option<&Path>,
+    validity_seconds: u64,
 ) -> Result<()> {
     let account_seed = fs::read_to_string(account_seed_path)
         .with_context(|| format!("read {}", account_seed_path.display()))?;
@@ -211,77 +235,55 @@ fn cmd_mint_user(
     let user =
         nkeys::KeyPair::from_seed(user_seed.trim()).map_err(|e| anyhow!("parse user seed: {e}"))?;
 
-    let acl = parse_acl(acl_path)?;
-    let creds = issue_and_format_creds(&account, &user, name, &acl)?;
+    let acl = creds::parse_acl_file(acl_path)?;
+    let now = unix_now();
+    let minted = creds::mint_user_creds(&account, &user, name, &acl, now, validity_seconds)
+        .map_err(|e| anyhow!("mint user creds: {e}"))?;
 
     let default_out = user_seed_path
         .parent()
-        .map(|p| p.join("nats.creds"))
+        .map(|p| p.join(creds::CREDS_FILE))
         .ok_or_else(|| anyhow!("user seed has no parent dir"))?;
     let out_path = out.map_or(default_out, Path::to_path_buf);
 
-    fs::write(&out_path, &creds).with_context(|| format!("write {}", out_path.display()))?;
+    fs::write(&out_path, &minted.creds_blob)
+        .with_context(|| format!("write {}", out_path.display()))?;
     restrict_permissions(&out_path)?;
 
+    // Sidecar: the unix-seconds expiry, written next to the creds
+    // file under `<basename>.expiry`. Lets the host's refresh task
+    // poll without parsing the JWT body.
+    let expiry_path = expiry_sidecar_path(&out_path);
+    fs::write(&expiry_path, minted.exp.to_string())
+        .with_context(|| format!("write {}", expiry_path.display()))?;
+    restrict_permissions(&expiry_path)?;
+
     println!(
-        "minted user JWT for {} → {}\n  user nkey: {}\n  account:   {}",
-        name,
+        "minted user JWT for {name} → {}\n  user nkey: {}\n  account:   {}\n  iat:       {}\n  exp:       {} ({}h validity)\n  jti:       {}",
         out_path.display(),
         user.public_key(),
         account.public_key(),
+        minted.iat,
+        minted.exp,
+        validity_seconds / 3600,
+        minted.jti,
     );
     Ok(())
 }
 
-/// Library-level helper — called both from the CLI path and from
-/// `iotctl plugin install`'s post-install hook (no fork/exec).
-///
-/// Reads the `acl.json` an earlier pass of `generate_nats_identity`
-/// wrote, then mints a user JWT + formats a creds-file blob.
-///
-/// # Errors
-/// IO on the ACL path, JSON parse, or JWT minting failure.
-pub fn issue_and_format_creds(
-    account: &nkeys::KeyPair,
-    user: &nkeys::KeyPair,
-    name: &str,
-    acl: &UserAcl,
-) -> Result<String> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let jwt = issue_user_jwt(account, &user.public_key(), name, acl, now)
-        .map_err(|e| anyhow!("mint user JWT: {e}"))?;
-    let seed = user.seed().map_err(|e| anyhow!("encode user seed: {e}"))?;
-    Ok(format_creds_file(&jwt, &seed))
+/// `<creds_path>.expiry`. Mirrors the install-dir convention but
+/// derived from whatever output path the operator passed to
+/// `mint-user --out`.
+fn expiry_sidecar_path(creds_path: &Path) -> PathBuf {
+    let mut s = creds_path.as_os_str().to_owned();
+    s.push(".expiry");
+    PathBuf::from(s)
 }
 
-/// Parse the `acl.json` snapshot `iotctl plugin install` wrote.
-///
-/// Exported for re-use from the install path — the fields are
-/// `allow_pub` + `allow_sub`, matching the [`UserAcl`] layout.
-///
-/// # Errors
-/// IO on the ACL path or JSON parse.
-pub fn parse_acl(path: &Path) -> Result<UserAcl> {
-    let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let v: serde_json::Value =
-        serde_json::from_str(&raw).with_context(|| format!("parse JSON {}", path.display()))?;
-    let collect_subjects = |key: &str| {
-        v.get(key)
-            .and_then(|a| a.as_array())
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|s| s.as_str().map(ToOwned::to_owned))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
-    };
-    Ok(UserAcl {
-        allow_pub: collect_subjects("allow_pub"),
-        allow_sub: collect_subjects("allow_sub"),
-    })
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 #[cfg(unix)]
@@ -355,26 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_acl_reads_existing_format() {
-        let td = TempDir::new().unwrap();
-        let path = td.path().join("acl.json");
-        fs::write(
-            &path,
-            r#"{
-                "plugin_id": "demo-echo",
-                "user_nkey": "UAAAA",
-                "allow_pub": ["device.demo-echo.>", "sys.demo-echo.>"],
-                "allow_sub": ["cmd.demo-echo.>"]
-            }"#,
-        )
-        .unwrap();
-        let acl = parse_acl(&path).expect("parse");
-        assert_eq!(acl.allow_pub, vec!["device.demo-echo.>", "sys.demo-echo.>"]);
-        assert_eq!(acl.allow_sub, vec!["cmd.demo-echo.>"]);
-    }
-
-    #[test]
-    fn mint_user_roundtrip() {
+    fn mint_user_roundtrip_writes_creds_and_expiry() {
         let td = TempDir::new().unwrap();
         cmd_bootstrap(td.path(), false, "IOT").expect("bootstrap");
 
@@ -401,12 +384,19 @@ mod tests {
             &acl_path,
             "demo-echo",
             Some(&out),
+            3600, // 1h validity for this test
         )
         .expect("mint");
 
         let creds = fs::read_to_string(&out).unwrap();
         assert!(creds.contains("-----BEGIN NATS USER JWT-----"));
         assert!(creds.contains("-----BEGIN USER NKEY SEED-----"));
+
+        // Sidecar got written alongside, with a sane integer.
+        let expiry_text = fs::read_to_string(td.path().join("demo-echo.creds.expiry")).unwrap();
+        let expiry: u64 = expiry_text.trim().parse().expect("expiry is integer");
+        // Some time after epoch + the 1h validity window we passed.
+        assert!(expiry > 3600, "expiry {expiry} must be after epoch");
 
         // Extract the JWT from the creds blob and verify under the
         // account — proves the whole mint chain works.
@@ -416,9 +406,13 @@ mod tests {
         let jwt = &creds[jwt_start..jwt_end];
         let account_seed = fs::read_to_string(td.path().join("iot-account.nk")).unwrap();
         let account = nkeys::KeyPair::from_seed(account_seed.trim()).unwrap();
-        let claims = iot_bus::jwt::verify_user_jwt(&account, jwt).expect("verify");
+        // `now == 0` skips the freshness check — we only care that
+        // signature + claim shape are correct here.
+        let claims = iot_bus::jwt::verify_user_jwt(&account, jwt, 0).expect("verify");
         assert_eq!(claims.name, "demo-echo");
         assert_eq!(claims.sub, user.public_key());
         assert_eq!(claims.nats.publish.allow, vec!["device.demo-echo.>"]);
+        assert_eq!(claims.exp, expiry, "JWT exp matches sidecar expiry");
+        assert_eq!(claims.jti.len(), 26, "ULID jti");
     }
 }

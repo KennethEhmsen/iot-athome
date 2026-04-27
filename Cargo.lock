@@ -2124,10 +2124,12 @@ dependencies = [
  "nkeys",
  "serde",
  "serde_json",
+ "tempfile",
  "testcontainers",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "ulid",
 ]
 
 [[package]]
@@ -2254,6 +2256,7 @@ dependencies = [
  "iot-core",
  "iot-observability",
  "iot-proto",
+ "nkeys",
  "reqwest",
  "rumqttc",
  "serde",
