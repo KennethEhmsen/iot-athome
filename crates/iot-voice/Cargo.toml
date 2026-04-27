@@ -31,6 +31,13 @@ cpal = ["dep:cpal"]
 # Cargo's incremental build means subsequent compiles are fast.
 # Behind a feature so default builds + ci-local stay CMake-free.
 whisper = ["dep:whisper-rs"]
+# Phrase-specific wake-word detection via `rustpotter` —
+# pure-Rust, MIT, no native deps. Operator supplies an `.rpw`
+# wake-word model file (trained from a few audio samples via
+# rustpotter's CLI). Drop-in `WakeDetector` impl alongside the
+# always-on `EnergyVadWakeDetector`. Default builds skip the
+# extra dep.
+wake-phrase = ["dep:rustpotter"]
 
 [dependencies]
 # Pipeline outputs ride the existing NATS bus; the binary path
@@ -60,6 +67,10 @@ cpal = { version = "0.15", optional = true }
 # clang-sys requirements; revisit when the workspace clang-sys
 # transitively bumps anyway.
 whisper-rs = { version = "0.13", default-features = false, optional = true }
+# Optional. See `[features].wake-phrase` above. Pure-Rust
+# wake-word detection. 3.x is the current line; the API takes
+# i16 samples (we convert from f32 in the adapter).
+rustpotter = { version = "3", default-features = false, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

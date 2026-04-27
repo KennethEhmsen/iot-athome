@@ -28,6 +28,12 @@ mic = ["iot-voice/cpal"]
 # <path>` flag is refused at runtime when this feature isn't
 # compiled in.
 stt-whisper = ["iot-voice/whisper"]
+# Activate `iot-voice/wake-phrase` to enable phrase-specific
+# wake-word detection via rustpotter. Operator supplies an
+# `.rpw` model file via the daemon's `--wake-model <path>` flag.
+# Without this feature, --wake-model is refused at runtime; the
+# pipeline falls back to the always-on energy-VAD wake.
+wake-phrase = ["iot-voice/wake-phrase"]
 
 [dependencies]
 # Library half: pure pipeline + traits + stub impls.

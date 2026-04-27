@@ -117,8 +117,8 @@ commit that implemented the corresponding piece.
 | W5 | Rule engine consumes `command.intent.>` | `96cb28e` |
 | W4a | Real audio capture via `cpal` (feature: `mic`) | `77491b1` |
 | W4c | Real STT via `whisper-rs` (feature: `stt-whisper`) | `893e45a` |
-| W4b | Energy-VAD wake detector (pure-Rust) | this commit |
-| W4b.5 | Phrase-specific wake-word (rustpotter / openWakeWord) | open |
+| W4b | Energy-VAD wake detector (pure-Rust) | `2551597` |
+| W4b.5 | Phrase-specific wake-word via rustpotter (feature: `wake-phrase`) | this commit |
 | W4d | Real TTS via `piper` | open |
 
 ### Build-prereq ladder
@@ -130,6 +130,7 @@ feature adds one prereq class:
 |---------|-------|---------------|
 | (default) | — | rustup toolchain |
 | `mic` (cpal) | iot-voice | system audio libs (alsa-dev on Linux; built-in on Win/macOS) |
+| `wake-phrase` (rustpotter) | iot-voice | none (pure Rust); operator supplies an `.rpw` model file |
 | `stt-whisper` | iot-voice | **CMake + Clang** on PATH (whisper.cpp build script) |
 | `tts-piper` (future) | iot-voice | CMake + Clang (piper build script — same toolchain as whisper) |
 

@@ -91,6 +91,14 @@ enum Command {
         /// instructions.
         #[arg(long, env = "IOT_VOICE_STT_MODEL")]
         stt_model: Option<std::path::PathBuf>,
+        /// Path to a rustpotter `.rpw` wake-word model. When
+        /// set, phrase-specific wake replaces the always-on
+        /// energy-VAD detector. Refused at runtime if the binary
+        /// wasn't built with `--features wake-phrase`. See
+        /// `iot-voice/src/rustpotter_wake.rs` for model-training
+        /// instructions.
+        #[arg(long, env = "IOT_VOICE_WAKE_MODEL")]
+        wake_model: Option<std::path::PathBuf>,
     },
 }
 
@@ -110,7 +118,11 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Send { text } => cmd_send(&bus, &text).await,
-        Command::Listen { use_mic, stt_model } => cmd_listen(bus, use_mic, stt_model).await,
+        Command::Listen {
+            use_mic,
+            stt_model,
+            wake_model,
+        } => cmd_listen(bus, use_mic, stt_model, wake_model).await,
     }
 }
 
@@ -158,7 +170,12 @@ async fn cmd_send(bus: &Bus, text: &str) -> Result<()> {
 /// `--stt-model` without `--use-mic` is refused — a stub audio
 /// source produces no frames, so loading a 140 MB model just to
 /// transcribe nothing is operator-error and we say so.
-async fn cmd_listen(bus: Bus, use_mic: bool, stt_model: Option<std::path::PathBuf>) -> Result<()> {
+async fn cmd_listen(
+    bus: Bus,
+    use_mic: bool,
+    stt_model: Option<std::path::PathBuf>,
+    wake_model: Option<std::path::PathBuf>,
+) -> Result<()> {
     let parser = RuleIntentParser::new();
     let sink = NatsIntentSink::new(bus);
 
@@ -167,18 +184,14 @@ async fn cmd_listen(bus: Bus, use_mic: bool, stt_model: Option<std::path::PathBu
             "--stt-model requires --use-mic; without real audio there's nothing to transcribe"
         );
     }
+    if wake_model.is_some() && !use_mic {
+        anyhow::bail!(
+            "--wake-model requires --use-mic; phrase-specific wake needs real audio frames"
+        );
+    }
 
     let stt = build_stt(stt_model.as_deref())?;
-    // Real audio gets a real detector — energy-VAD self-
-    // calibrates over the first 2 s, then fires on sustained
-    // speech-like signal. Stub audio (no --use-mic) keeps the
-    // amplitude-stub for backwards-compat with the M5b W3 smoke
-    // tests.
-    let wake: Box<dyn WakeDetector> = if use_mic {
-        Box::new(EnergyVadWakeDetector::new())
-    } else {
-        Box::new(StubWakeDetector::default())
-    };
+    let wake = build_wake(use_mic, wake_model.as_deref())?;
 
     if use_mic {
         run_with_mic(wake, stt, parser, sink).await
@@ -193,6 +206,53 @@ async fn cmd_listen(bus: Bus, use_mic: bool, stt_model: Option<std::path::PathBu
         pipeline.run().await.context("pipeline run")?;
         info!("pipeline ended (stub source exhausted)");
         Ok(())
+    }
+}
+
+/// Build the wake detector, picking rustpotter over energy-VAD
+/// when a `--wake-model` is set + the `wake-phrase` feature is on.
+///
+/// Selection matrix:
+///
+/// | use_mic | wake_model | Detector |
+/// |---------|-----------|----------|
+/// | false   | n/a       | StubWakeDetector (amplitude) |
+/// | true    | None      | EnergyVadWakeDetector (always-on) |
+/// | true    | Some(_)   | RustpotterWakeDetector (phrase-specific) |
+#[cfg(feature = "wake-phrase")]
+fn build_wake(
+    use_mic: bool,
+    wake_model: Option<&std::path::Path>,
+) -> Result<Box<dyn WakeDetector>> {
+    if let Some(path) = wake_model {
+        info!(model = %path.display(), "loading rustpotter wake-word model");
+        let r = iot_voice::RustpotterWakeDetector::load(path)
+            .map_err(|e| anyhow::anyhow!("load wake model: {e}"))?;
+        return Ok(Box::new(r));
+    }
+    if use_mic {
+        Ok(Box::new(EnergyVadWakeDetector::new()))
+    } else {
+        Ok(Box::new(StubWakeDetector::default()))
+    }
+}
+
+#[cfg(not(feature = "wake-phrase"))]
+fn build_wake(
+    use_mic: bool,
+    wake_model: Option<&std::path::Path>,
+) -> Result<Box<dyn WakeDetector>> {
+    if wake_model.is_some() {
+        anyhow::bail!(
+            "binary built without --features wake-phrase; \
+             rebuild iot-voice-daemon with `cargo build -p iot-voice-daemon --features wake-phrase` \
+             to enable --wake-model."
+        );
+    }
+    if use_mic {
+        Ok(Box::new(EnergyVadWakeDetector::new()))
+    } else {
+        Ok(Box::new(StubWakeDetector::default()))
     }
 }
 
