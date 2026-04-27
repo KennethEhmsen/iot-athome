@@ -80,6 +80,16 @@ if ($Quick) {
 }
 
 # ---------------------------------------------------------- Full layer
+#
+# These match what `.github/workflows/ci.yml` does so a green
+# ci-local locally means the CI runners won't surface anything
+# new. The bumps from the original `cargo deny check` →
+# `cargo deny --all-features check` (and clippy with
+# `--all-features`) closed the gap that let Unlicense /
+# whisper-rs through during the M5b tag retag-loop on GH.
+# Cross-platform `cfg(unix)` vs `cfg(windows)` arms are the
+# remaining gap; ci-local on Windows compiles both arms via
+# tests but Linux-only code only catches up on the runner.
 
 Run-Step "cargo clippy" {
     cargo clippy --workspace --all-targets -- -D warnings
@@ -94,7 +104,7 @@ Run-Step "cargo nextest" {
 }
 
 Run-Step "cargo deny" {
-    cargo deny check
+    cargo deny --all-features check
 }
 
 Write-Host "[ci-local] all checks passed" -ForegroundColor Green

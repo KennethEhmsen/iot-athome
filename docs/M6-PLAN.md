@@ -120,22 +120,22 @@ Provisions targeted:
 * **5.13 Validate input data** — the manifest-derived ACL
   enforcement + CEL source size cap + intent grammar rejection.
 
-Open W2 deliverables (the rows that need NEW evidence):
-* [ ] `docs/security/cert-rotation-test.md` + an integration test
-  that rotates the dev CA mid-run and asserts client reconnects.
-  **Deferred to M6 W2.5** — testcontainers + cert ops is its
-  own session.
+W2 deliverables status:
+* [x] `docs/security/etsi-303-645.md` — 13-row evidence table
+  with provision-by-provision citations, coverage summary,
+  reverse-traceability map. ✅ Shipped W2.
 * [x] `iotctl history prune --device-id <id>` subcommand. ✅
   Shipped W2.
 * [x] `iotctl history prune --before <rfc3339>` flag. ✅ Shipped
-  W2 (didn't previously exist; checked the codebase, no `history`
-  subcommand at all). Both filters compose AND-wise via
+  W2. Both filters compose AND-wise via
   `prune_for_device(device_id, cutoff: Option)` on the
   underlying `HistoryStore`.
-* [x] `docs/security/etsi-303-645.md` — 13-row evidence table
-  with provision-by-provision citations, coverage summary
-  (11 C, 2 P, 0 O, 0 N/A), and a reverse-traceability map.
-  ✅ Shipped W2.
+* [x] `docs/security/cert-rotation-test.md` — threat model,
+  operator runbooks (routine + incident), test plan,
+  unit-pinning. ✅ Shipped W2.5.
+* [ ] Live broker integration test that rotates the dev CA
+  mid-run. Stubbed in cert-rotation-test.md; the
+  testcontainers+cert plumbing lands in a follow-up.
 
 ### W3 — OWASP ASVS L2 verification
 
@@ -169,6 +169,18 @@ untrusted-or-semi-trusted network. ASVS L2 verification scopes:
 
 W3 produces `docs/security/asvs-l2.md` — the per-requirement
 evidence matrix, similar to W2's ETSI doc.
+
+W3 deliverables status:
+* [x] `docs/security/asvs-l2.md` — per-requirement evidence
+  matrix covering V1-V14 (with V6 marked L3-only), coverage
+  table (12 C / 1 P / 0 O across in-scope categories),
+  TLS-at-rest operator runbook, reverse-traceability map.
+  ✅ Shipped W3.
+* [x] `docs/security/threat-model.md` — STRIDE walk on the
+  gateway, plugin-host, bus, history, and audit-log
+  components, with trust-gradient table, residual-risk
+  callouts for the M6 W4 pen-test SOW, and accepted gaps
+  (live cert reload, TLS-at-rest). ✅ Shipped W3.
 
 ### W4 — Pen test + final tag
 
