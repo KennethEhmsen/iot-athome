@@ -36,6 +36,8 @@ use iot_plugin_host::capabilities::CapabilityMap;
 use iot_plugin_host::manifest::Manifest;
 use iot_plugin_host::supervisor;
 
+use crate::secfile::restrict_permissions;
+
 /// Default install root. Kept in sync with `iot_plugin_host::Config`'s own
 /// default so `iotctl plugin install` writes to the same place the host
 /// reads from without per-operator configuration.
@@ -543,22 +545,6 @@ fn generate_nats_identity(dest: &Path, plugin_id: &str, caps: &CapabilityMap) ->
         nkey = %public_key,
         "generated NATS identity"
     );
-    Ok(())
-}
-
-#[cfg(unix)]
-fn restrict_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("chmod 0600 {}", path.display()))
-}
-
-#[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)]
-fn restrict_permissions(_path: &Path) -> Result<()> {
-    // Windows ACLs require a different ritual; leaving the seed at
-    // default perms is acceptable on dev boxes. Signature kept Result<()>
-    // so Unix + Windows call-sites don't diverge.
     Ok(())
 }
 

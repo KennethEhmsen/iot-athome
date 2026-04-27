@@ -32,9 +32,35 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context as _, Result};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
+use base64::Engine as _;
 use clap::Subcommand;
+use rand_core::{OsRng, RngCore as _};
 
 use iot_bus::jwt::{format_creds_file, issue_account_jwt, issue_user_jwt, AccountLimits, UserAcl};
+
+use crate::secfile::restrict_permissions;
+
+/// Default user-JWT lifetime — 90 days. Long enough that operators
+/// don't have to refresh weekly during dev; short enough that a
+/// compromised plugin's creds expire on a sane horizon. Refresh by
+/// re-running `iotctl plugin install` (or `iotctl nats mint-user`).
+///
+/// Sized to 90 d × 24 h × 3600 s — the audit's H1 finding flagged
+/// non-expiring user JWTs as accidental "forever creds"; this
+/// constant is the explicit deny.
+pub const USER_JWT_TTL_SECS: u64 = 90 * 24 * 60 * 60;
+
+/// Produce a fresh JWT id (`jti`) — 16 random bytes, base64url-no-pad
+/// encoded. Sufficient entropy that two simultaneously-minted JWTs
+/// collide with probability << 2^-64 per RFC 7519 §4.1.7 guidance,
+/// which is the precondition for jti to be useful as a revocation
+/// reference.
+fn generate_jti() -> String {
+    let mut bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    B64URL.encode(bytes)
+}
 
 #[derive(Debug, Subcommand)]
 pub enum NatsCmd {
@@ -250,7 +276,14 @@ pub fn issue_and_format_creds(
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    let jwt = issue_user_jwt(account, &user.public_key(), name, acl, now)
+    // `saturating_add` because `now == 0` (in the unlikely case the
+    // clock pre-dates the epoch) would wrap; the worst-case fallback
+    // is a JWT with `exp == u64::MAX`, which the NATS server treats
+    // as "no expiry" — matches the pre-H1 behaviour rather than
+    // refusing to mint.
+    let exp = now.saturating_add(USER_JWT_TTL_SECS);
+    let jti = generate_jti();
+    let jwt = issue_user_jwt(account, &user.public_key(), name, acl, now, exp, &jti)
         .map_err(|e| anyhow!("mint user JWT: {e}"))?;
     let seed = user.seed().map_err(|e| anyhow!("encode user seed: {e}"))?;
     Ok(format_creds_file(&jwt, &seed))
@@ -282,21 +315,6 @@ pub fn parse_acl(path: &Path) -> Result<UserAcl> {
         allow_pub: collect_subjects("allow_pub"),
         allow_sub: collect_subjects("allow_sub"),
     })
-}
-
-#[cfg(unix)]
-fn restrict_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("chmod 0600 {}", path.display()))
-}
-
-#[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)]
-fn restrict_permissions(_path: &Path) -> Result<()> {
-    // Windows ACLs are a different beast — dev boxes only. Kept
-    // Result<()> so Unix + Windows call-sites don't diverge.
-    Ok(())
 }
 
 #[cfg(test)]

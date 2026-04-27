@@ -55,7 +55,7 @@ use iot_proto_core::iot::device::v1::EntityState;
 use prost::Message as _;
 use tracing::{debug, info, warn};
 
-use crate::expr::eval_bool;
+use crate::expr::eval_bool_with_timeout;
 use crate::rule::{RawAction, Rule};
 
 /// How long the idempotency cache remembers a `(rule, subject,
@@ -145,7 +145,7 @@ impl Engine {
             if !rule.triggers_on(subject) {
                 continue;
             }
-            match eval_bool(&rule.when, &payload) {
+            match eval_bool_with_timeout(&rule.when, &payload).await {
                 Ok(true) => {
                     // Short-circuit on idempotency: same rule, same
                     // subject, same payload bytes within the TTL count

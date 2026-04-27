@@ -24,6 +24,7 @@ mod mosquitto;
 mod nats;
 mod plugin;
 mod rule;
+mod secfile;
 
 use anyhow::{anyhow, Context as _, Result};
 use clap::{Parser, Subcommand};

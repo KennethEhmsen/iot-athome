@@ -76,6 +76,16 @@ pub struct UserClaims {
     pub sub: String,
     /// Issued-at unix seconds.
     pub iat: u64,
+    /// Expiration unix seconds. NATS server rejects the JWT after
+    /// this time. Set well into the future for long-lived plugin
+    /// creds; refresh by re-running `iotctl plugin install`. The
+    /// audit's H1 finding flagged JWT-without-exp as accidental
+    /// non-expiry — this field closes that hole.
+    pub exp: u64,
+    /// Unique JWT id — random nonce, base64url-no-pad-encoded. Lets a
+    /// future revocation list reference an exact JWT without
+    /// invalidating the whole user. RFC 7519 §4.1.7.
+    pub jti: String,
     /// Human-readable name (plugin id, user name, …).
     pub name: String,
     /// NATS-specific claim block.
@@ -199,6 +209,14 @@ impl Default for AccountLimits {
 ///   wrote).
 /// * `iat` — issued-at as unix seconds. Caller provides so tests
 ///   can pin timestamps.
+/// * `exp` — expiration unix seconds. NATS server rejects the JWT
+///   after this time. Pass a value well into the future for
+///   long-lived plugin creds — `issue_and_format_creds` defaults
+///   to `iat + 90 days`.
+/// * `jti` — unique JWT identifier (RFC 7519 §4.1.7). Should be
+///   a random nonce; used by future revocation logic. The library
+///   doesn't require any specific encoding, but base64url of 16+
+///   random bytes is the recommended shape.
 ///
 /// # Errors
 /// Serialisation of the payload, or signing failure from the nkeys
@@ -209,11 +227,15 @@ pub fn issue_user_jwt(
     name: &str,
     acl: &UserAcl,
     iat: u64,
+    exp: u64,
+    jti: &str,
 ) -> Result<String, JwtError> {
     let claims = UserClaims {
         iss: issuer.public_key(),
         sub: subject_public.to_owned(),
         iat,
+        exp,
+        jti: jti.to_owned(),
         name: name.to_owned(),
         nats: UserNatsClaims {
             publish: Permissions {
@@ -413,6 +435,8 @@ mod tests {
             "demo-echo",
             &fixed_acl(),
             1_700_000_000,
+            1_700_086_400, // iat + 1 day
+            "test-jti-fixture",
         )
         .expect("issue");
 
@@ -421,6 +445,8 @@ mod tests {
         assert_eq!(claims.sub, user.public_key());
         assert_eq!(claims.name, "demo-echo");
         assert_eq!(claims.iat, 1_700_000_000);
+        assert_eq!(claims.exp, 1_700_086_400);
+        assert_eq!(claims.jti, "test-jti-fixture");
         assert_eq!(claims.nats.type_, "user");
         assert_eq!(claims.nats.version, 2);
         assert_eq!(claims.nats.publish.allow, vec!["device.demo-echo.>"]);
@@ -439,11 +465,47 @@ mod tests {
             "demo-echo",
             &fixed_acl(),
             1_700_000_000,
+            1_700_086_400,
+            "jti-x",
         )
         .unwrap();
 
         let err = verify_user_jwt(&impostor, &token).unwrap_err();
         assert!(matches!(err, JwtError::BadSignature), "{err:?}");
+    }
+
+    #[test]
+    fn jwt_carries_distinct_jti_per_call_when_caller_rotates() {
+        // Two issues with different jti values produce signatures over
+        // distinct payloads. We don't assert "JWTs differ entirely"
+        // because iat is deterministic in the test — the assertion is
+        // strictly that jti round-trips and that the verify path picks
+        // up the value the caller passed.
+        let account = nkeys::KeyPair::new_account();
+        let user = nkeys::KeyPair::new_user();
+        let t1 = issue_user_jwt(
+            &account,
+            &user.public_key(),
+            "x",
+            &fixed_acl(),
+            100,
+            200,
+            "jti-1",
+        )
+        .unwrap();
+        let t2 = issue_user_jwt(
+            &account,
+            &user.public_key(),
+            "x",
+            &fixed_acl(),
+            100,
+            200,
+            "jti-2",
+        )
+        .unwrap();
+        assert_ne!(t1, t2, "different jti must produce different JWTs");
+        assert_eq!(verify_user_jwt(&account, &t1).unwrap().jti, "jti-1");
+        assert_eq!(verify_user_jwt(&account, &t2).unwrap().jti, "jti-2");
     }
 
     #[test]
@@ -546,6 +608,8 @@ mod tests {
             "demo-echo",
             &fixed_acl(),
             1_700_000_000,
+            1_700_086_400,
+            "bootstrap-test-jti",
         )
         .expect("user issue");
         verify_user_jwt(&account, &user_jwt).expect("user verify");
@@ -567,6 +631,8 @@ mod tests {
             iss: "AACME".into(),
             sub: "UUSR".into(),
             iat: 1,
+            exp: 100,
+            jti: "abcd".into(),
             name: "x".into(),
             nats: UserNatsClaims {
                 publish: Permissions {
@@ -582,5 +648,7 @@ mod tests {
         assert!(s.contains(r#""pub":{"allow":["a.>"]}"#));
         assert!(s.contains(r#""type":"user""#));
         assert!(s.contains(r#""version":2"#));
+        assert!(s.contains(r#""exp":100"#));
+        assert!(s.contains(r#""jti":"abcd""#));
     }
 }

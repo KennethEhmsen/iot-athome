@@ -47,8 +47,30 @@
 //! longer the limit.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use thiserror::Error;
+
+/// Hard upper bound on rule-source byte length.
+///
+/// The CEL parser is quadratic in some pathological grammars;
+/// capping the source ahead of `compile()` makes the parse-phase
+/// cost predictable. 64 KB is roughly 10 000 lines of typical rule
+/// text — far above any real-world rule, well below an
+/// attacker-crafted DoS payload. Audit's H2 finding: parse with no
+/// input cap was an unbounded resource consumer.
+pub const MAX_EXPR_SOURCE_BYTES: usize = 64 * 1024;
+
+/// Per-eval wall-clock deadline.
+///
+/// CEL's evaluator has no built-in budget — a recursive macro on a
+/// deeply-nested payload could spin for tens of seconds before
+/// producing a value. The engine eval path runs inside
+/// `spawn_blocking` with this timeout; on miss the rule is skipped
+/// (not retried) and a `Timeout` error logs at `warn!`. 200 ms is
+/// two orders of magnitude over any healthy rule's eval time (most
+/// are <100 µs); rules that hit it are a red flag, not a transient.
+pub const EVAL_TIMEOUT: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Error)]
 pub enum ExprError {
@@ -56,6 +78,16 @@ pub enum ExprError {
     Parse(String),
     #[error("runtime: {0}")]
     Runtime(String),
+    /// Source exceeded [`MAX_EXPR_SOURCE_BYTES`]. Refuses parse
+    /// rather than letting cel-interpreter chew on a multi-MB blob.
+    #[error("expression source too large: {got} bytes > {max} byte cap")]
+    SourceTooLarge { got: usize, max: usize },
+    /// Eval exceeded [`EVAL_TIMEOUT`]. The result is "rule didn't
+    /// fire" — the caller's responsibility is to log + carry on,
+    /// not to retry (a CEL eval that times out once will time out
+    /// every time given the same rule + payload shape).
+    #[error("expression evaluation exceeded {0:?} deadline")]
+    Timeout(Duration),
 }
 
 /// A compiled rule condition. Opaque from outside — callers go through
@@ -86,6 +118,12 @@ pub struct Expr {
 /// `Parse` variant. The work inside is pure CPU on a borrowed
 /// `&str` — no `RefCell` / `Mutex` poisoning concerns.
 pub fn parse(src: &str) -> Result<Expr, ExprError> {
+    if src.len() > MAX_EXPR_SOURCE_BYTES {
+        return Err(ExprError::SourceTooLarge {
+            got: src.len(),
+            max: MAX_EXPR_SOURCE_BYTES,
+        });
+    }
     let src_owned = src.to_owned();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         cel_interpreter::Program::compile(&src_owned)
@@ -140,6 +178,48 @@ pub fn eval_bool(expr: &Expr, payload: &serde_json::Value) -> Result<bool, ExprE
     }
 }
 
+/// Async wrapper around [`eval_bool`] that enforces [`EVAL_TIMEOUT`].
+///
+/// CEL evaluation is pure CPU + sync, so the work is dispatched onto
+/// tokio's blocking-thread pool via `spawn_blocking`; a `tokio::time::
+/// timeout` then races the future. On miss, the dispatched task is
+/// **not** cancelled (Rust threads can't be aborted), so the
+/// run-away computation continues until cel-interpreter exits its
+/// own loop — but the caller no longer waits on it, so the engine's
+/// per-message latency stays bounded. A pathological rule that
+/// times out repeatedly will pile up worker threads, which is loud
+/// (visible via tokio's blocking-pool metrics) rather than silent
+/// — operationally the right tradeoff for a "rule author shipped
+/// something pathological" failure mode.
+///
+/// # Errors
+/// All variants of [`eval_bool`] plus [`ExprError::Timeout`] when
+/// the evaluator doesn't return inside [`EVAL_TIMEOUT`].
+///
+/// # Panics
+/// The inner `spawn_blocking` task is wrapped in a panic-catching
+/// adapter via `tokio::task::JoinHandle`; if cel-interpreter panics
+/// (e.g. on a malformed AST that escaped the parser's checks), the
+/// resulting `JoinError` is mapped to `ExprError::Runtime` rather
+/// than propagating.
+pub async fn eval_bool_with_timeout(
+    expr: &Expr,
+    payload: &serde_json::Value,
+) -> Result<bool, ExprError> {
+    // Clone the inputs into the blocking task. `Expr` is `Arc`-backed
+    // so this is cheap; `Value` clones the JSON tree (typically tens
+    // of bytes for our rule payloads — no measurable cost).
+    let expr_clone = expr.clone();
+    let payload_clone = payload.clone();
+    let work = tokio::task::spawn_blocking(move || eval_bool(&expr_clone, &payload_clone));
+
+    match tokio::time::timeout(EVAL_TIMEOUT, work).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(join_err)) => Err(ExprError::Runtime(format!("eval task: {join_err}"))),
+        Err(_elapsed) => Err(ExprError::Timeout(EVAL_TIMEOUT)),
+    }
+}
+
 /// Convert `serde_json::Value` → `cel_interpreter::Value`.
 ///
 /// cel-interpreter 0.10 ships a CEL→JSON conversion (`Value::json()`)
@@ -181,7 +261,7 @@ fn json_to_cel(v: &serde_json::Value) -> cel_interpreter::Value {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -296,5 +376,68 @@ mod tests {
         let p = json!({"value": 1});
         assert!(eval_bool(&cloned, &p).unwrap());
         assert!(eval_bool(&e, &p).unwrap());
+    }
+
+    // ----------------------------------------------------- H2 audit fixes
+
+    #[test]
+    fn parse_rejects_oversize_source() {
+        // 64 KB + 1 byte. The parser should refuse before invoking
+        // cel-interpreter, so the error variant is `SourceTooLarge`,
+        // not `Parse`.
+        let huge = "true ".repeat(MAX_EXPR_SOURCE_BYTES / 5 + 1);
+        assert!(huge.len() > MAX_EXPR_SOURCE_BYTES);
+        match parse(&huge) {
+            Err(ExprError::SourceTooLarge { got, max }) => {
+                assert_eq!(max, MAX_EXPR_SOURCE_BYTES);
+                assert!(got > max);
+            }
+            other => panic!("expected SourceTooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_accepts_just_under_cap() {
+        // Boundary case: exactly MAX bytes of valid CEL must still
+        // parse. Use a long string of `||` clauses to fill space
+        // without producing an absurd parse cost.
+        let mut src = String::with_capacity(MAX_EXPR_SOURCE_BYTES);
+        // Each "true||" is 6 bytes; pad to just below the cap then
+        // close with a trailing `true`.
+        while src.len() + 10 < MAX_EXPR_SOURCE_BYTES {
+            src.push_str("true||");
+        }
+        src.push_str("true");
+        assert!(src.len() <= MAX_EXPR_SOURCE_BYTES);
+        let _ = parse(&src).expect("under-cap source must parse");
+    }
+
+    #[tokio::test]
+    async fn eval_timeout_returns_in_bounded_time_on_normal_input() {
+        // The timeout wrapper must not regress the fast path. A
+        // trivial rule should round-trip well under the deadline.
+        let e = parse("payload.value > 0").expect("parse");
+        let p = json!({"value": 1});
+        let started = std::time::Instant::now();
+        let res = eval_bool_with_timeout(&e, &p).await;
+        let elapsed = started.elapsed();
+        assert!(matches!(res, Ok(true)));
+        // Spawn-blocking + scheduling is sub-millisecond on a healthy
+        // dev box. Anything under 50 ms is generous and still proves
+        // we're not hitting the 200 ms timeout in the happy path.
+        assert!(elapsed < Duration::from_millis(50), "took {elapsed:?}");
+    }
+
+    #[tokio::test]
+    async fn eval_timeout_round_trips_runtime_error() {
+        // A rule that evaluates to a non-bool returns Runtime, not
+        // Timeout — the wrapper preserves the inner error variant.
+        let e = parse("payload.value").expect("parse");
+        let p = json!({"value": 5});
+        let err = eval_bool_with_timeout(&e, &p).await.unwrap_err();
+        assert!(
+            matches!(err, ExprError::Runtime(_)),
+            "expected Runtime, got {err:?}"
+        );
     }
 }

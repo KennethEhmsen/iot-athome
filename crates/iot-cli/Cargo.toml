@@ -36,6 +36,10 @@ futures.workspace = true
 nkeys.workspace = true
 p256.workspace = true
 prost.workspace = true
+# Used both by the install path's signature-verification (dev-deps) AND
+# by the runtime path's `generate_jti` for fresh JWT identifiers — the
+# audit's H1 fix needs an OS-random source out of the test gate.
+rand_core = { version = "0.6", features = ["std"] }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
@@ -48,7 +52,7 @@ ulid.workspace = true
 [dev-dependencies]
 # Integration test signs a synthetic plugin.wasm with a freshly-generated
 # P-256 key, then verifies the install path accepts it. Needs the
-# `signing` feature + an OS random generator.
+# `signing` feature + an OS random generator (the latter inherited from
+# the main `rand_core` dep above).
 p256 = { workspace = true, features = ["ecdsa", "pem", "std"] }
-rand_core = { version = "0.6", features = ["std"] }
 tempfile = "3.14"

@@ -24,6 +24,41 @@ use crate::Bus;
 pub const DEVICE_STATE_STREAM: &str = "DEVICE_STATE";
 pub const DEVICE_STATE_SUBJECT: &str = "device.>";
 
+/// Hard upper bound on replay-fan-out per call. A wildcard subject
+/// like `device.>` can match thousands of subjects on a busy hub —
+/// without this cap, a single panel reconnect could dump tens of
+/// thousands of messages into a single fetch and stall the gateway
+/// loop. The audit's M3 finding flagged the previous `min(1024)`
+/// cap as best-case-only — `num_pending` is a server-reported value
+/// that can race with new publishes between consumer-create and
+/// fetch. This is the absolute ceiling, regardless of `num_pending`.
+const REPLAY_HARD_CAP: u64 = 5000;
+
+/// Fetched-batch size — the loop pulls at most this many messages
+/// per `fetch().messages()` round, then yields back to the runtime
+/// before the next batch. Sized to keep per-batch latency under
+/// ~10 ms even on a slow disk-backed JetStream, so the gateway's
+/// async loop stays responsive during a wide replay.
+const REPLAY_BATCH_SIZE: usize = 500;
+
+// Compile-time invariants on the replay-cap constants — see the
+// inline rationale on REPLAY_HARD_CAP / REPLAY_BATCH_SIZE for what
+// each band protects against. A `const { assert!(...) }` block
+// catches a regression at compile time rather than during tests.
+const _: () = {
+    // Hard cap > batch size — otherwise we'd never run a 2nd batch.
+    assert!(REPLAY_HARD_CAP > REPLAY_BATCH_SIZE as u64);
+    // Batch size large enough to make progress per round-trip, small
+    // enough to yield often.
+    assert!(REPLAY_BATCH_SIZE >= 100);
+    assert!(REPLAY_BATCH_SIZE <= 2000);
+    // "Any reasonable home" ceiling for distinct device subjects
+    // under `device.>`. If the cap looks low, the operator's real
+    // workload deserves a paginated API, not a higher cap.
+    assert!(REPLAY_HARD_CAP >= 1000);
+    assert!(REPLAY_HARD_CAP <= 50_000);
+};
+
 impl Bus {
     /// Idempotently create (or upgrade) the `DEVICE_STATE` stream.
     /// Safe to call on every process start — `get_or_create_stream`
@@ -129,6 +164,15 @@ impl Bus {
         // batch fetch by it; if zero, return early. `info()` takes
         // `&mut self`; clone first so the underlying `consumer`
         // remains usable for the subsequent `fetch()`.
+        //
+        // `num_pending` is informational, not a hard contract — new
+        // publishes between this call and the fetch can arrive on
+        // the same filter — so the loop below also enforces
+        // `REPLAY_HARD_CAP` in the message-counting path. The
+        // audit's M3 finding called out the previous single-batch
+        // shape: a single `fetch().max_messages(1024)` could fan
+        // out unbounded if `num_pending` was reported low at info()
+        // time but the broker delivered more on the wire.
         let mut info_handle = consumer.clone();
         let pending = info_handle
             .info()
@@ -139,24 +183,69 @@ impl Bus {
             return Ok(Vec::new());
         }
 
-        // Cap batch at a sensible limit; fetches above this would
-        // chunk into multiple calls in a real load scenario but
-        // wildcard panel-replay caps at the device count, which is
-        // O(100) for any reasonable home.
-        let batch_size = pending.min(1024);
-        let mut batch = consumer
-            .fetch()
-            .max_messages(usize::try_from(batch_size).unwrap_or(1024))
-            .messages()
-            .await
-            .map_err(|e| JetstreamError::LastMsg(format!("fetch batch: {e}")))?;
+        // Bounded chunked-fetch loop — each iteration pulls at most
+        // REPLAY_BATCH_SIZE messages, yields to the runtime between
+        // batches, and bails as soon as REPLAY_HARD_CAP is reached.
+        // `target_total` is informational only; the real ceiling is
+        // REPLAY_HARD_CAP applied to the running message counter.
+        let target_total = pending.min(REPLAY_HARD_CAP);
+        let mut out = Vec::with_capacity(usize::try_from(target_total).unwrap_or(0));
+        let mut truncated = false;
 
-        let mut out = Vec::with_capacity(usize::try_from(batch_size).unwrap_or(0));
-        while let Some(msg_res) = batch.next().await {
-            match msg_res {
-                Ok(msg) => out.push((msg.subject.to_string(), msg.payload.to_vec())),
-                Err(e) => return Err(JetstreamError::LastMsg(format!("stream item: {e}"))),
+        while (out.len() as u64) < target_total {
+            // Don't ask the broker for more than we'd accept.
+            let remaining = target_total - out.len() as u64;
+            let this_batch = remaining.min(REPLAY_BATCH_SIZE as u64);
+            let this_batch_usize = usize::try_from(this_batch).unwrap_or(REPLAY_BATCH_SIZE);
+
+            let mut batch = consumer
+                .fetch()
+                .max_messages(this_batch_usize)
+                .messages()
+                .await
+                .map_err(|e| JetstreamError::LastMsg(format!("fetch batch: {e}")))?;
+
+            let mut got_any = false;
+            while let Some(msg_res) = batch.next().await {
+                match msg_res {
+                    Ok(msg) => {
+                        out.push((msg.subject.to_string(), msg.payload.to_vec()));
+                        got_any = true;
+                        if (out.len() as u64) >= REPLAY_HARD_CAP {
+                            truncated = true;
+                            break;
+                        }
+                    }
+                    Err(e) => return Err(JetstreamError::LastMsg(format!("stream item: {e}"))),
+                }
             }
+
+            if truncated {
+                break;
+            }
+            if !got_any {
+                // Broker had nothing more on this batch — `num_pending`
+                // overcounted (subject was deleted between info() and
+                // fetch, or the stream was purged). Stop instead of
+                // looping forever asking for messages that aren't
+                // coming.
+                break;
+            }
+
+            // Yield back to the runtime so the gateway's WS loop +
+            // other consumers don't starve during a wide replay.
+            tokio::task::yield_now().await;
+        }
+
+        if truncated {
+            tracing::warn!(
+                target: "iot_bus::jetstream",
+                pattern = pattern,
+                returned = out.len(),
+                hard_cap = REPLAY_HARD_CAP,
+                pending_at_create = pending,
+                "wildcard replay truncated at hard cap; remaining subjects need a follow-up call"
+            );
         }
         Ok(out)
     }
@@ -248,4 +337,10 @@ mod tests {
         assert!(!is_no_message(&Stub("stream not found")));
         assert!(!is_no_message(&Stub("connection refused")));
     }
+
+    // The replay-cap invariants are pure constant arithmetic — they
+    // live in a `const { assert!(...) }` block at module scope (just
+    // below the const declarations themselves) so the checks run at
+    // compile time, which is both stricter (clippy::items_after_test_module
+    // friendly) and more useful as a regression guard.
 }
