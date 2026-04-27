@@ -124,6 +124,38 @@ pub async fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+/// `GET /.well-known/security.txt` — RFC 9116 vulnerability
+/// disclosure pointer (M6 W0 prep).
+///
+/// Plain-text response with a stable contact path. Mirrors the
+/// `panel/public/.well-known/security.txt` for prod deployments
+/// where Envoy serves the panel's static assets at the same
+/// well-known URI; this gateway endpoint is the dev / direct-hub
+/// fallback so a researcher pointing scanner tooling at the bare
+/// hub always finds a disclosure path.
+///
+/// The literal returned is kept inline (rather than reading from
+/// disk) so the binary always self-contains a valid response —
+/// no failure mode where the binary deploys but the file's
+/// missing. Update on any policy revision.
+#[instrument]
+pub async fn well_known_security_txt() -> ([(&'static str, &'static str); 2], &'static str) {
+    let body = "Contact: mailto:security@iot-athome.example\n\
+                Expires: 2027-04-27T00:00:00Z\n\
+                Encryption: https://iot-athome.example/.well-known/pgp-key.asc\n\
+                Preferred-Languages: en, da\n\
+                Canonical: https://iot-athome.example/.well-known/security.txt\n\
+                Policy: https://github.com/KennethEhmsen/iot-athome/blob/main/SECURITY.md\n\
+                Acknowledgments: https://github.com/KennethEhmsen/iot-athome/security/advisories\n";
+    (
+        [
+            ("content-type", "text/plain; charset=utf-8"),
+            ("cache-control", "public, max-age=86400"),
+        ],
+        body,
+    )
+}
+
 #[instrument(skip(state, body))]
 pub async fn upsert_device(
     State(state): State<AppState>,

@@ -1,0 +1,7 @@
+Contact: mailto:security@iot-athome.example
+Expires: 2027-04-27T00:00:00Z
+Encryption: https://iot-athome.example/.well-known/pgp-key.asc
+Preferred-Languages: en, da
+Canonical: https://iot-athome.example/.well-known/security.txt
+Policy: https://github.com/KennethEhmsen/iot-athome/blob/main/SECURITY.md
+Acknowledgments: https://github.com/KennethEhmsen/iot-athome/security/advisories

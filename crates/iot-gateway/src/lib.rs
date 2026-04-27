@@ -167,6 +167,18 @@ pub async fn run(cfg: Config) -> Result<()> {
 
     let app = Router::new()
         .route("/healthz", get(handlers::health))
+        // RFC 9116 vulnerability-disclosure pointer (M6 W0 prep).
+        // No auth, no CORS — security.txt is conventionally
+        // served as plain text from the well-known URI on every
+        // public-facing host. The panel ships the same file as a
+        // static asset for prod-Envoy deployments; the gateway
+        // route is the dev / direct-hub fallback so an external
+        // researcher pointing a tool at the host always finds a
+        // disclosure path.
+        .route(
+            "/.well-known/security.txt",
+            get(handlers::well_known_security_txt),
+        )
         // `/stream` self-authenticates via ?token= (WS handshakes can't set
         // Authorization headers on the browser side).
         .route("/stream", get(stream::stream_handler))
