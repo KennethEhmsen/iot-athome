@@ -62,22 +62,18 @@ researchers can already file disclosures while the rest of M6 runs.
 - [ ] **PGP key generation + publication** — operator-side
   ceremony; the public key uploads to keys.openpgp.org +
   appears in the security.txt's `Encryption:` field.
-- [ ] **SLSA hard-gate** — flip `continue-on-error: true` →
-  `false` in `.github/workflows/ci.yml`'s SLSA provenance step.
-  **BLOCKED** on a product decision: at the v0.6.0-m5b release-
-  ceremony attempt, the attestation API rejected the call with
-  "Feature not available for user-owned private repositories"
-  (run 25005026705). To unblock, pick one:
-  * `gh repo edit KennethEhmsen/iot-athome --visibility public`
-    — flips the repo to public; attestation API works
-    immediately; W1 closes by removing the
-    `continue-on-error: true` line.
-  * Upgrade the GitHub plan to one with private-repo
-    attestations (Team / Enterprise tier).
-  The M2-era assumption "the repo will go public in M5a" was
-  incorrect; the repo stayed private. Until either choice
-  above, this step ships as a warning, with cosign + Rekor
-  carrying the signature story.
+- [x] **SLSA hard-gate** ✅ closed post-v0.6.0-m5b. The repo
+  flipped to public on 2026-04-27, which unblocked GitHub's
+  attestation API (it refuses user-owned private repos).
+  `continue-on-error: true` is now removed from the SLSA-
+  provenance step in `.github/workflows/ci.yml`. The next tag
+  bump exercises the hard-gate live; if the attestation step
+  fails, `sign` fails, and `publish` (which depends on it)
+  doesn't fire. ADR-0006's "M6 hard-gate" item closes.
+
+  Reverse-path: if the repo flips back to private (or moves to
+  a plan without private-repo attestations), restore
+  `continue-on-error: true` and reopen this entry.
 - [ ] **Reproducibility byte-match** — the M2 reproducibility job
   builds twice + diffoscope-diffs; M6 adds a hard `exit 1` if
   diffoscope reports any difference. Today the job's `success`

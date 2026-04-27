@@ -238,34 +238,21 @@ jobs:
             cosign sign-blob --yes "$f" --bundle "$f.cosign.bundle"
           done
       - name: SLSA provenance
-        # KEPT AS A WARNING (`continue-on-error: true`).
+        # M6 W1 hard-gate. The repo flipped to public after the
+        # v0.6.0-m5b ceremony shipped, so GitHub's attestation
+        # API now accepts the call (it had refused user-owned
+        # private repos). Without `continue-on-error`, a failure
+        # here halts the `sign` job, which blocks the `publish`
+        # job (`needs: [sign, reproducibility]`) — no half-signed
+        # orphan releases, no Rekor entry without matching
+        # attestation. ADR-0006's "M6 hard-gate" item closes.
         #
-        # The M6 W1 plan was to flip this to a hard-gate, but the
-        # attempt at v0.6.0-m5b's release-ceremony run failed
-        # with: "Failed to persist attestation: Feature not
-        # available for user-owned private repositories. To
-        # enable this feature, please make this repository
-        # public." (run 25005026705).
-        #
-        # The repo is currently `KennethEhmsen/iot-athome` —
-        # user-owned + private — and GitHub's attestations API
-        # is gated behind public visibility OR a paid plan that
-        # includes private-repo attestations. Until one of those
-        # changes, this step has to stay continue-on-error or
-        # every tag run fails permanently at sign.
-        #
-        # The `cosign sign-blob` step above already signs every
-        # artifact + records a Rekor entry, so the release's
-        # authenticity story is intact. SLSA-L3 provenance is
-        # the strict-superset attestation that's missing.
-        #
-        # M6 W1 status: BLOCKED on visibility-or-plan decision.
-        # docs/M6-PLAN.md tracks. To unblock: either
-        #   gh repo edit KennethEhmsen/iot-athome --visibility public
-        # OR upgrade the GitHub plan to one with private-repo
-        # attestations, then remove `continue-on-error` here.
+        # If a future deployment needs to revert the repo to
+        # private (or move to a plan without attestation
+        # coverage), restore `continue-on-error: true` so the
+        # release pipeline doesn't deadlock — and reopen
+        # docs/M6-PLAN.md's W1 entry.
         uses: actions/attest-build-provenance@v4
-        continue-on-error: true
         with:
           subject-path: 'artifacts/**/iot-*'
 
