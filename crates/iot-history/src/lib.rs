@@ -121,12 +121,19 @@ impl HistoryStore {
         .await
         .map_err(HistoryError::Schema)?;
 
-        // Hypertable conversion. The `extschema => '_timescaledb_internal'`
-        // form would be more defensive, but the standard call works
-        // when the timescaledb extension is loaded as superuser.
-        // Wrapped in a do-block so non-Timescale Postgres simply
-        // ignores the missing function and keeps the plain table.
-        let _ = sqlx::query(
+        // Hypertable conversion. Guarded by a `pg_extension` check
+        // so non-Timescale Postgres skips the call rather than
+        // raising "function create_hypertable does not exist".
+        //
+        // We deliberately do NOT propagate this DDL's error: if the
+        // bootstrap can't convert (perms, conflicting chunk dims,
+        // partial-migration leftover), the table still works as an
+        // ordinary Postgres table — record/fetch/prune all run
+        // identically. The Bucket 1 audit caught the previous
+        // `let _ = ...` as silent-degrade with no operator
+        // visibility; we now warn-log so it surfaces in the host's
+        // logs instead of disappearing.
+        if let Err(e) = sqlx::query(
             "DO $$
              BEGIN
                  IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') THEN
@@ -139,7 +146,14 @@ impl HistoryStore {
              END $$",
         )
         .execute(&self.pool)
-        .await;
+        .await
+        {
+            tracing::warn!(
+                target: "iot_history",
+                error = %e,
+                "hypertable bootstrap DDL failed; table will run as plain Postgres (no chunk pruning)"
+            );
+        }
 
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS entity_state_history_device_ts \

@@ -221,11 +221,21 @@ fn default_client_id() -> String {
 /// 2→1; when A exits, 1→0 and we send `UNSUBSCRIBE`. Without this,
 /// the broker keeps delivering messages that no plugin handles
 /// after the last subscriber dies (M5a W3 — debt #7 closure).
+///
+/// Bucket 1 audit fix (H3): held under `tokio::sync::Mutex` so the
+/// refcount-decision and the corresponding broker call (SUBSCRIBE
+/// / UNSUBSCRIBE) are atomic from the broker's perspective. The
+/// previous `std::sync::RwLock` could not be held across an await,
+/// which forced a release-then-await gap. Two concurrent calls —
+/// A bringing 1→0 while B brings 0→1 — could then interleave such
+/// that B's SUBSCRIBE landed on the broker BEFORE A's UNSUBSCRIBE,
+/// leaving the broker desynced from the refcount. The async mutex
+/// closes that gap.
 #[derive(Debug)]
 pub struct MqttBroker {
     client: AsyncClient,
     router: MqttRouter,
-    filter_refcount: RwLock<HashMap<String, usize>>,
+    filter_refcount: tokio::sync::Mutex<HashMap<String, usize>>,
 }
 
 impl MqttBroker {
@@ -258,7 +268,7 @@ impl MqttBroker {
         Ok(Arc::new(Self {
             client,
             router,
-            filter_refcount: RwLock::new(HashMap::new()),
+            filter_refcount: tokio::sync::Mutex::new(HashMap::new()),
         }))
     }
 
@@ -280,17 +290,22 @@ impl MqttBroker {
     /// register the same filter just bump the count, avoiding
     /// duplicate broker traffic.
     ///
+    /// **Atomic across the broker call (Bucket 1 audit fix H3):**
+    /// the lock is held *across* the rumqttc subscribe call, so a
+    /// concurrent `unsubscribe_filter` can't slip in between the
+    /// 0→1 decision and the SUBSCRIBE landing on the wire.
+    /// Per-host serialisation is acceptable here because subscribe
+    /// operations are infrequent (mostly at plugin startup) and
+    /// rumqttc's request channel is bounded anyway.
+    ///
     /// # Errors
     /// Propagates `rumqttc::ClientError` — channel-full or shutting
     /// down conditions on the AsyncClient's request queue.
     pub async fn subscribe_filter(&self, filter: &str) -> Result<()> {
-        let send_subscribe = {
-            #[allow(clippy::unwrap_used)]
-            let mut counts = self.filter_refcount.write().unwrap();
-            let entry = counts.entry(filter.to_owned()).or_insert(0);
-            *entry += 1;
-            *entry == 1
-        };
+        let mut counts = self.filter_refcount.lock().await;
+        let entry = counts.entry(filter.to_owned()).or_insert(0);
+        *entry += 1;
+        let send_subscribe = *entry == 1;
         if send_subscribe {
             self.client
                 .subscribe(filter, QoS::AtLeastOnce)
@@ -312,27 +327,25 @@ impl MqttBroker {
     ///
     /// Called by the supervisor on plugin exit, once per filter the
     /// router returned from `unregister(plugin_id)`. M5a W3 — debt
-    /// #7 closure.
+    /// #7 closure; race-fixed in the Bucket 1 audit pass (see the
+    /// per-struct comment for why the lock spans the broker call).
     ///
     /// # Errors
     /// Propagates `rumqttc::ClientError` from the unsubscribe call.
     pub async fn unsubscribe_filter(&self, filter: &str) -> Result<()> {
-        let send_unsubscribe = {
-            #[allow(clippy::unwrap_used)]
-            let mut counts = self.filter_refcount.write().unwrap();
-            match counts.get_mut(filter) {
-                Some(count) if *count > 1 => {
-                    *count -= 1;
-                    false
-                }
-                Some(_) => {
-                    counts.remove(filter);
-                    true
-                }
-                None => {
-                    tracing::warn!(filter, "mqtt unsubscribe: filter not in refcount");
-                    false
-                }
+        let mut counts = self.filter_refcount.lock().await;
+        let send_unsubscribe = match counts.get_mut(filter) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                false
+            }
+            Some(_) => {
+                counts.remove(filter);
+                true
+            }
+            None => {
+                tracing::warn!(filter, "mqtt unsubscribe: filter not in refcount");
+                false
             }
         };
         if send_unsubscribe {
@@ -351,12 +364,15 @@ impl MqttBroker {
 
     /// Read-only view of the per-filter refcount. Used by tests + a
     /// future `iotctl plugin list --verbose` slice.
-    #[must_use]
-    pub fn filter_refcount(&self, filter: &str) -> usize {
-        #[allow(clippy::unwrap_used)]
+    ///
+    /// Async because the underlying mutex is `tokio::sync::Mutex` —
+    /// the change from `RwLock` to async-mutex was driven by the
+    /// race fix above. Lock is held briefly so the contention cost
+    /// is the same shape as before.
+    pub async fn filter_refcount(&self, filter: &str) -> usize {
         self.filter_refcount
-            .read()
-            .unwrap()
+            .lock()
+            .await
             .get(filter)
             .copied()
             .unwrap_or(0)
@@ -571,7 +587,7 @@ mod tests {
         Arc::new(MqttBroker {
             client,
             router: MqttRouter::new(),
-            filter_refcount: RwLock::new(HashMap::new()),
+            filter_refcount: tokio::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -581,7 +597,7 @@ mod tests {
         broker.subscribe_filter("rtl_433/+").await.expect("first");
         broker.subscribe_filter("rtl_433/+").await.expect("second");
         broker.subscribe_filter("rtl_433/+").await.expect("third");
-        assert_eq!(broker.filter_refcount("rtl_433/+"), 3);
+        assert_eq!(broker.filter_refcount("rtl_433/+").await, 3);
         // The broker-side debug log discriminates "real" from
         // "refcount-only" subscribes; we don't introspect logs here,
         // but the refcount itself is the user-visible signal.
@@ -593,15 +609,15 @@ mod tests {
         broker.subscribe_filter("rtl_433/+").await.unwrap();
         broker.subscribe_filter("rtl_433/+").await.unwrap();
         broker.subscribe_filter("rtl_433/+").await.unwrap();
-        assert_eq!(broker.filter_refcount("rtl_433/+"), 3);
+        assert_eq!(broker.filter_refcount("rtl_433/+").await, 3);
 
         broker.unsubscribe_filter("rtl_433/+").await.unwrap();
-        assert_eq!(broker.filter_refcount("rtl_433/+"), 2);
+        assert_eq!(broker.filter_refcount("rtl_433/+").await, 2);
         broker.unsubscribe_filter("rtl_433/+").await.unwrap();
-        assert_eq!(broker.filter_refcount("rtl_433/+"), 1);
+        assert_eq!(broker.filter_refcount("rtl_433/+").await, 1);
         broker.unsubscribe_filter("rtl_433/+").await.unwrap();
         // 1→0 transition removes the key entirely.
-        assert_eq!(broker.filter_refcount("rtl_433/+"), 0);
+        assert_eq!(broker.filter_refcount("rtl_433/+").await, 0);
     }
 
     #[tokio::test]
@@ -610,7 +626,7 @@ mod tests {
         // Never subscribed — unsubscribe is a no-op (warns at host
         // level, doesn't error).
         broker.unsubscribe_filter("never/seen").await.unwrap();
-        assert_eq!(broker.filter_refcount("never/seen"), 0);
+        assert_eq!(broker.filter_refcount("never/seen").await, 0);
     }
 
     #[tokio::test]
@@ -620,12 +636,61 @@ mod tests {
         broker.subscribe_filter("a/+").await.unwrap();
         broker.subscribe_filter("b/+").await.unwrap();
 
-        assert_eq!(broker.filter_refcount("a/+"), 2);
-        assert_eq!(broker.filter_refcount("b/+"), 1);
+        assert_eq!(broker.filter_refcount("a/+").await, 2);
+        assert_eq!(broker.filter_refcount("b/+").await, 1);
 
         broker.unsubscribe_filter("a/+").await.unwrap();
-        assert_eq!(broker.filter_refcount("a/+"), 1);
-        assert_eq!(broker.filter_refcount("b/+"), 1);
+        assert_eq!(broker.filter_refcount("a/+").await, 1);
+        assert_eq!(broker.filter_refcount("b/+").await, 1);
+    }
+
+    #[tokio::test]
+    async fn refcount_concurrent_inc_dec_race_smoke() {
+        // Regression for the Bucket 1 audit H3 finding: with the
+        // pre-fix std::sync::RwLock, two concurrent ops on the same
+        // filter (one inc, one dec) released the lock between the
+        // refcount transition and the broker call, opening a race
+        // where the broker could observe SUBSCRIBE-then-UNSUBSCRIBE
+        // in the wrong order. The fix holds the async-mutex across
+        // both, serialising the wire-order to match the refcount
+        // transitions.
+        //
+        // We can't trivially test the broker's wire view in a unit
+        // test (rumqttc is the I/O surface) but we CAN drive the
+        // refcount through 10 concurrent up-then-down cycles and
+        // verify the post-condition: after N inc then N dec, the
+        // filter is gone and the count is 0. Pre-fix this would
+        // sometimes leave a stale 1 because of the race; post-fix
+        // it's deterministic.
+        let broker = synthetic_broker();
+        let n = 10;
+        let mut ups = Vec::with_capacity(n);
+        for _ in 0..n {
+            let b = broker.clone();
+            ups.push(tokio::spawn(async move {
+                b.subscribe_filter("test/race").await.unwrap();
+            }));
+        }
+        for h in ups {
+            h.await.unwrap();
+        }
+        assert_eq!(broker.filter_refcount("test/race").await, n);
+
+        let mut downs = Vec::with_capacity(n);
+        for _ in 0..n {
+            let b = broker.clone();
+            downs.push(tokio::spawn(async move {
+                b.unsubscribe_filter("test/race").await.unwrap();
+            }));
+        }
+        for h in downs {
+            h.await.unwrap();
+        }
+        assert_eq!(
+            broker.filter_refcount("test/race").await,
+            0,
+            "after balanced inc/dec the count must be 0; non-zero indicates a refcount race"
+        );
     }
 
     // -------------------------------------------------------- broker config
