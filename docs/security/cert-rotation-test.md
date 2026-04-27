@@ -183,9 +183,22 @@ covers:
 
 * **Documentation:** ✅ This file (M6 W2.5).
 * **Operator runbooks:** ✅ Two scenarios above.
-* **Integration test:** ⏳ Stubbed; the `cert_rotation.rs`
-  test file lands in a follow-up commit alongside the
-  testcontainers-NATS-with-custom-cert plumbing.
+* **Structural integration test:** ✅
+  `crates/iot-bus/tests/cert_rotation.rs` — three always-on
+  tests covering: (1) two independent CA chains via rcgen
+  produce independent Configs; (2) a rustls verifier trusting
+  CA-A correctly rejects a leaf signed by CA-B (the rotation
+  correctness property — same code path
+  `Bus::connect`'s rustls handshake takes); (3) Config
+  construction is lazy-IO (an about-to-rotate path doesn't
+  error on construction, allowing atomic operator-side
+  preparation).
+* **Live-broker integration test:** ⏳ Stubbed at
+  `cert_rotation.rs::live_rotation_via_testcontainers`,
+  `#[ignore]`-gated. Blocked on testcontainers-rs 0.27's
+  NATS module being the plain-tcp variant — mTLS requires a
+  custom Image impl mounting cert + server.conf (~150 lines
+  of test scaffolding). Follow-up.
 * **Live-reload (no restart) capability:** ✗ Out of scope;
   documented as a post-M6 hardening item.
 

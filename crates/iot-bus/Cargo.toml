@@ -35,3 +35,11 @@ tracing.workspace = true
 [dev-dependencies]
 testcontainers.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+# Cert minting for the cert-rotation tests (M6 W2.5). Pure-Rust
+# X.509 + ECDSA-P256 leaf generation; no openssl shell-out, no
+# CMake. The generated certs land in tempdir-scoped paths that
+# match what `iot_bus::Config` expects on disk.
+rcgen = { version = "0.13", default-features = false, features = ["pem", "crypto", "ring"] }
+tempfile = "3.14"
+rustls = { workspace = true, default-features = false, features = ["ring", "std"] }
+rustls-pemfile.workspace = true
