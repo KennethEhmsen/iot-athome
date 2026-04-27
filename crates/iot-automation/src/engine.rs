@@ -98,26 +98,50 @@ impl Engine {
         }
     }
 
-    /// Subscribe to the union of all rule triggers and run forever.
+    /// Subscribe to the union of all rule-trigger subject roots and
+    /// run forever.
+    ///
+    /// The engine subscribes to two root patterns covering everything
+    /// rules currently target:
+    ///
+    /// * `device.>` — every device-state / device-event publish (M3).
+    /// * `command.intent.>` — voice / UI intents emitted by
+    ///   [`iot_voice`]'s daemon and [`iot-voice send`] (M5b W3+).
+    ///   Rules that act on operator commands trigger here.
+    ///
+    /// Streams from both are merged via [`futures::stream::select`]
+    /// — order across the two roots is best-effort (NATS doesn't
+    /// guarantee global ordering anyway). Adding a third subject
+    /// family later (`audio.satellite.>` for the future ESP32
+    /// satellites, etc.) is one more `subscribe` + `select_with`.
+    ///
+    /// Fine-grained per-rule subscriptions stay a deferred
+    /// optimisation; for M3-scale rule counts, fanning two broad
+    /// subjects out in-process is still cheaper than a subscription
+    /// per trigger.
     ///
     /// # Errors
     /// Bus subscribe failure. Per-message errors are logged and the
     /// loop keeps running — one malformed payload or transient action
     /// failure doesn't take down the engine.
     pub async fn run(self) -> Result<()> {
-        // Subscribe once to `device.>` (the only subject family rules
-        // currently target). Fine-grained per-rule subscriptions are a
-        // W2.3 optimisation; for M3's scale — dozens of rules — fanning
-        // out in-process is cheaper than a subscription per trigger.
-        let mut sub = self
+        let device_sub = self
             .bus
             .raw()
             .subscribe("device.>".to_string())
             .await
             .context("subscribe device.>")?;
+        let intent_sub = self
+            .bus
+            .raw()
+            .subscribe("command.intent.>".to_string())
+            .await
+            .context("subscribe command.intent.>")?;
+        let mut merged = futures::stream::select(device_sub, intent_sub);
+
         info!(rules = self.rules.len(), "automation engine started");
 
-        while let Some(msg) = sub.next().await {
+        while let Some(msg) = merged.next().await {
             // Scope the handler under the inbound traceparent so the
             // audit entry + any DLQ publish carries the upstream trace
             // id. Missing / malformed → fresh root.
@@ -579,5 +603,116 @@ mod tests {
         // Payload differs.
         let p = idempotency_key("rule-x", "device.a.b.c.state", br#"{"x":1}"#);
         assert_ne!(base, p);
+    }
+
+    // ---------------------------------------------- M5b W5: intent triggers
+    //
+    // The engine subscribes to `command.intent.>` alongside
+    // `device.>` (see Engine::run); rules can target intent
+    // subjects identically. These tests pin the data-shape contract
+    // between iot-voice's published JSON and what the rule engine
+    // sees, so a future Intent-struct field rename surfaces here as
+    // a test failure rather than as a silent rule-skip in
+    // production.
+
+    use crate::expr;
+    use crate::rule::Rule;
+
+    /// Sample intent payload as iot-voice-daemon's NatsIntentSink
+    /// would publish it.
+    fn sample_lights_on_intent_bytes() -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "domain": "lights",
+            "verb": "on",
+            "args": { "target": "kitchen" },
+            "raw": "turn on the kitchen light",
+            "confidence": 0.95
+        }))
+        .expect("serialise sample intent")
+    }
+
+    fn sample_cancel_intent_bytes() -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "domain": "system",
+            "verb": "cancel",
+            "args": null,
+            "raw": "stop",
+            "confidence": 1.0
+        }))
+        .expect("serialise sample cancel intent")
+    }
+
+    #[test]
+    fn intent_payload_decodes_with_args_target() {
+        let v = decode_payload(&sample_lights_on_intent_bytes());
+        assert_eq!(v["domain"], "lights");
+        assert_eq!(v["verb"], "on");
+        assert_eq!(v["args"]["target"], "kitchen");
+        assert_eq!(v["raw"], "turn on the kitchen light");
+    }
+
+    #[tokio::test]
+    async fn intent_rule_when_clause_matches_target() {
+        // The "lights-on-by-intent" sample rule's `when` clause:
+        //     payload.args.target == "kitchen"
+        let when = expr::parse(r#"payload.args.target == "kitchen""#).expect("parse");
+        let payload = decode_payload(&sample_lights_on_intent_bytes());
+        let fired = expr::eval_bool_with_timeout(&when, &payload)
+            .await
+            .expect("eval");
+        assert!(fired, "when should match for target=kitchen");
+    }
+
+    #[tokio::test]
+    async fn intent_rule_when_clause_rejects_other_target() {
+        let when = expr::parse(r#"payload.args.target == "kitchen""#).expect("parse");
+        let bedroom_intent = serde_json::to_vec(&serde_json::json!({
+            "domain": "lights",
+            "verb": "on",
+            "args": { "target": "bedroom" },
+            "raw": "turn on the bedroom light",
+            "confidence": 0.95
+        }))
+        .unwrap();
+        let payload = decode_payload(&bedroom_intent);
+        let fired = expr::eval_bool_with_timeout(&when, &payload)
+            .await
+            .expect("eval");
+        assert!(!fired, "when should not match for target=bedroom");
+    }
+
+    #[test]
+    fn intent_rule_yaml_loads_and_triggers_on_intent_subject() {
+        // Mirrors examples/rules/lights-on-by-intent.yaml. Inline
+        // here so the test doesn't depend on the example file's
+        // path — Rule::from_yaml accepts a string slice.
+        let yaml = r#"
+id: kitchen-light-on-intent
+description: test fixture
+triggers:
+  - command.intent.lights.on
+when: 'payload.args.target == "kitchen"'
+actions:
+  - !publish
+    subject: cmd.zigbee2mqtt.kitchen-bulb.switch.cmd
+    iot_type: iot.device.v1.Command
+    payload_template: '{"action":"on"}'
+"#;
+        let rule = Rule::from_yaml(yaml).expect("compile");
+        assert!(rule.triggers_on("command.intent.lights.on"));
+        assert!(!rule.triggers_on("command.intent.lights.off"));
+        assert!(!rule.triggers_on("device.zigbee2mqtt.kitchen-bulb.switch.state"));
+    }
+
+    #[tokio::test]
+    async fn cancel_intent_rule_fires_unconditionally() {
+        // examples/rules/cancel-on-intent.yaml uses `when: "true"`
+        // because every system-cancel intent should broadcast,
+        // regardless of args.
+        let when = expr::parse("true").expect("parse");
+        let payload = decode_payload(&sample_cancel_intent_bytes());
+        assert!(expr::eval_bool_with_timeout(&when, &payload)
+            .await
+            .expect("eval"));
     }
 }

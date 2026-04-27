@@ -1,0 +1,16 @@
+# M3-style device-state rule.
+#
+# Fires when the kitchen-temp z2m sensor reports >25 °C, asks the
+# kitchen-fan device to turn on. Demonstrates the trigger / when /
+# action shape every other rule mirrors.
+id: kitchen-fan-hot
+description: Turn the kitchen fan on when kitchen temperature exceeds 25 °C.
+triggers:
+  - device.zigbee2mqtt.kitchen-temp.temperature.state
+when: "payload.value > 25"
+actions:
+  - !publish
+    subject: cmd.zigbee2mqtt.kitchen-fan.switch.cmd
+    iot_type: iot.device.v1.Command
+    payload_template: |
+      {"action": "on"}

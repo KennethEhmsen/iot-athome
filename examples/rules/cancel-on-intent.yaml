@@ -1,0 +1,25 @@
+# M5b W5 — system-cancel broadcast.
+#
+# Fires when the operator says "stop" / "cancel" / "never mind".
+# The voice pipeline maps all three to a single
+# `command.intent.system.cancel` intent (see
+# `iot_voice::intent::RuleIntentParser`). This rule echoes that
+# back as a broadcast `cmd.system.cancel` for any plugin that
+# wants to listen — running automations, music playback, alarm
+# countdowns, etc.
+#
+# The `when: "true"` clause is intentional: any system-cancel
+# fires the broadcast unconditionally. Plugins that need
+# scope-specific cancels listen to `command.intent.system.cancel`
+# directly + inspect `payload.args` themselves.
+id: system-cancel-intent
+description: Broadcast a system-cancel signal when the operator says stop / cancel / never mind.
+triggers:
+  - command.intent.system.cancel
+when: "true"
+actions:
+  - !publish
+    subject: cmd.system.cancel
+    iot_type: iot.system.v1.Cancel
+    payload_template: |
+      {"reason":"voice","raw":"{{payload.raw}}"}

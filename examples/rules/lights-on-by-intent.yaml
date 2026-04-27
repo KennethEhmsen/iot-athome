@@ -1,0 +1,34 @@
+# M5b W5 — voice/UI intent → device command.
+#
+# Fires when `iot-voice send "turn on the kitchen light"` (or the
+# panel's intent button, or any other publisher of
+# `command.intent.lights.on` payloads with target=kitchen) lands on
+# the bus. Translates the abstract intent into the concrete z2m
+# command the kitchen-bulb plugin expects.
+#
+# The intent payload (per `iot_voice::Intent`) decodes as JSON:
+#     {
+#       "domain": "lights",
+#       "verb":   "on",
+#       "args":   { "target": "kitchen" },
+#       "raw":    "turn on the kitchen light",
+#       "confidence": 0.95
+#     }
+#
+# `payload.args.target == "kitchen"` is the discriminator — without
+# it this rule would also fire for `command.intent.lights.on` with
+# target=bedroom, hallway, etc. The recommended pattern is one rule
+# per (domain, verb, target) tuple; an LLM-fallback NLU emitting
+# free-form targets would want a generic dispatch rule that maps
+# target → device id (M5b W6+ scope).
+id: kitchen-light-on-intent
+description: Turn the kitchen bulb on when a "lights on kitchen" intent arrives.
+triggers:
+  - command.intent.lights.on
+when: 'payload.args.target == "kitchen"'
+actions:
+  - !publish
+    subject: cmd.zigbee2mqtt.kitchen-bulb.switch.cmd
+    iot_type: iot.device.v1.Command
+    payload_template: |
+      {"action": "on"}
