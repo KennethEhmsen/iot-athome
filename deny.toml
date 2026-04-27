@@ -22,6 +22,15 @@ allow = [
     "CDLA-Permissive-2.0",    # Linux Foundation — permissive, used by SBOM crates
     "0BSD",
     "MPL-2.0",
+    # Unlicense — public-domain-equivalent dedication. OSI-rejected
+    # for vague legal mechanics, but FSF-free and widely used in
+    # the Rust ecosystem (including `whisper-rs` and
+    # `whisper-rs-sys` which we pull in under the optional
+    # `iot-voice/whisper` feature). Treated as MIT-equivalent for
+    # commercial-shipment purposes; mainline cargo-deny configs
+    # in the same enterprise band (sigstore, deno, fluvio) all
+    # accept it.
+    "Unlicense",
 ]
 confidence-threshold = 0.8
 
