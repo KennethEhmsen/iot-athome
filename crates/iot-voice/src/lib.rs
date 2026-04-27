@@ -52,7 +52,7 @@ pub mod wake;
 
 pub use audio::{AudioFrame, AudioSource, AudioSourceError, StubAudioSource};
 pub use intent::{
-    Intent, IntentParser, IntentSink, LogIntentSink, RuleIntentParser, StubIntentSink,
+    Intent, IntentError, IntentParser, IntentSink, LogIntentSink, RuleIntentParser, StubIntentSink,
 };
 pub use pipeline::{Pipeline, PipelineError, PipelineMetrics};
 pub use stt::{SpeechRecognizer, SttError, StubSpeechRecognizer};

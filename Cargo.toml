@@ -24,6 +24,13 @@ members = [
   # commits behind cargo features so cross-platform CI doesn't
   # need a CMake bootstrap until the real impls are wired.
   "crates/iot-voice",
+  # M5b W3: voice daemon binary. Wires `iot-voice`'s pipeline to
+  # NATS via a `NatsIntentSink`. Two subcommands: `send <text>`
+  # (parse + publish, no audio) and `listen` (full pipeline; stub
+  # stages today, real audio + wake + STT in M5b W4+ behind cargo
+  # features). Kept separate from the library so unit tests of the
+  # pipeline don't drag in iot-bus / async-nats.
+  "crates/iot-voice-daemon",
 ]
 exclude = [
   "firmware/*",
