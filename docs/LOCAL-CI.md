@@ -100,6 +100,27 @@ just lint-fast
 That's a 1:1 match for the GitHub workflow's `preflight`, `build`,
 `test`, and `vuln` jobs.
 
+## Windows: seed-file ACLs
+
+`iotctl nats bootstrap` and `iotctl plugin install` write nkey
+seeds + NATS creds files to the install dir. On Unix those are
+`chmod 0600`'d after write; on Windows the same code path shells
+out to `icacls` to strip inherited ACEs and grant the current
+user full control only — no other principal can read the seed.
+
+The Unix path is exercised by every `cargo test -p iot-cli` run
+on the main `test` job; the Windows path runs on the `test-windows`
+job in `.github/workflows/ci.yml`. If you're hardening that path
+locally on Windows, run `cargo test -p iot-cli --bins secrets::` —
+both `windows_grants_owner_only` and `idempotent_on_same_file`
+exercise it.
+
+The TLS `*.key` files `tools/devcerts/mint.sh` writes are NOT
+covered by this path (mint.sh's `chmod 600` is a no-op on
+NTFS). Treat the dev TLS material as workstation-local; don't
+reuse it off-machine. See ADR-0011's Windows hardening note for
+the broader story.
+
 ## Integration tests (Docker required)
 
 The CI's `integration` job runs:

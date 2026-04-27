@@ -132,6 +132,32 @@ jobs:
       - name: cargo nextest
         run: cargo nextest run --workspace --all-targets
 
+  # Windows-specific gate: the M5 Bucket-1 audit fix made the
+  # `restrict_permissions` helper at `crates/iot-cli/src/secrets.rs`
+  # cross-platform (chmod 0600 on Unix, `icacls /inheritance:r
+  # /grant:r <user>:F` on Windows). The Unix path is exercised by
+  # the workspace `test` job above; this job exists to keep the
+  # Windows ACL path from rotting silently. Scoped to iot-cli (not
+  # the whole workspace) because wasmtime + sqlx + async-nats on
+  # MSVC PDB symbol caps are a separate fight; widening this
+  # matrix is a follow-up. ADR-0011 Windows-hardening note carries
+  # the full context.
+  test-windows:
+    name: test-windows (iot-cli)
+    needs: preflight
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.84.0
+      - name: cargo test -p iot-cli
+        # iot-cli is a binary-only crate (no library target), so we
+        # scope to --bins; the per-module tests in nats.rs / plugin.rs
+        # / secrets.rs all live under the binary's `tests` modules.
+        run: cargo test -p iot-cli --bins
+
   # -------------------- 4. Integration --------------------
   integration:
     name: integration

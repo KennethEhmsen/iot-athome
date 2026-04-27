@@ -354,7 +354,7 @@ fn mint_creds_post_install(dest: &Path, plugin_id: &str, account_seed_path: &Pat
     let creds = crate::nats::issue_and_format_creds(&account, &user, plugin_id, &acl)?;
 
     fs::write(&creds_path, &creds).with_context(|| format!("write {}", creds_path.display()))?;
-    restrict_permissions(&creds_path)?;
+    crate::secrets::restrict_permissions(&creds_path)?;
 
     tracing::info!(
         plugin = %plugin_id,
@@ -526,7 +526,7 @@ fn generate_nats_identity(dest: &Path, plugin_id: &str, caps: &CapabilityMap) ->
 
     let seed_path = dest.join("nats.nkey");
     fs::write(&seed_path, &seed).with_context(|| format!("write {}", seed_path.display()))?;
-    restrict_permissions(&seed_path)?;
+    crate::secrets::restrict_permissions(&seed_path)?;
 
     let acl = serde_json::json!({
         "plugin_id": plugin_id,
@@ -543,22 +543,6 @@ fn generate_nats_identity(dest: &Path, plugin_id: &str, caps: &CapabilityMap) ->
         nkey = %public_key,
         "generated NATS identity"
     );
-    Ok(())
-}
-
-#[cfg(unix)]
-fn restrict_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("chmod 0600 {}", path.display()))
-}
-
-#[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)]
-fn restrict_permissions(_path: &Path) -> Result<()> {
-    // Windows ACLs require a different ritual; leaving the seed at
-    // default perms is acceptable on dev boxes. Signature kept Result<()>
-    // so Unix + Windows call-sites don't diverge.
     Ok(())
 }
 

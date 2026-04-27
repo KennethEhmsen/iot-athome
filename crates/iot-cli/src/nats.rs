@@ -134,7 +134,7 @@ fn cmd_bootstrap(out: &Path, force: bool, account_name: &str) -> Result<()> {
         .map_err(|e| anyhow!("encode operator seed: {e}"))?;
     fs::write(&operator_seed_path, &operator_seed)
         .with_context(|| format!("write {}", operator_seed_path.display()))?;
-    restrict_permissions(&operator_seed_path)?;
+    crate::secrets::restrict_permissions(&operator_seed_path)?;
     fs::write(&operator_pub_path, operator.public_key())
         .with_context(|| format!("write {}", operator_pub_path.display()))?;
 
@@ -144,7 +144,7 @@ fn cmd_bootstrap(out: &Path, force: bool, account_name: &str) -> Result<()> {
         .map_err(|e| anyhow!("encode account seed: {e}"))?;
     fs::write(&account_seed_path, &account_seed)
         .with_context(|| format!("write {}", account_seed_path.display()))?;
-    restrict_permissions(&account_seed_path)?;
+    crate::secrets::restrict_permissions(&account_seed_path)?;
     fs::write(&account_pub_path, account.public_key())
         .with_context(|| format!("write {}", account_pub_path.display()))?;
 
@@ -221,7 +221,7 @@ fn cmd_mint_user(
     let out_path = out.map_or(default_out, Path::to_path_buf);
 
     fs::write(&out_path, &creds).with_context(|| format!("write {}", out_path.display()))?;
-    restrict_permissions(&out_path)?;
+    crate::secrets::restrict_permissions(&out_path)?;
 
     println!(
         "minted user JWT for {} → {}\n  user nkey: {}\n  account:   {}",
@@ -282,21 +282,6 @@ pub fn parse_acl(path: &Path) -> Result<UserAcl> {
         allow_pub: collect_subjects("allow_pub"),
         allow_sub: collect_subjects("allow_sub"),
     })
-}
-
-#[cfg(unix)]
-fn restrict_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("chmod 0600 {}", path.display()))
-}
-
-#[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)]
-fn restrict_permissions(_path: &Path) -> Result<()> {
-    // Windows ACLs are a different beast — dev boxes only. Kept
-    // Result<()> so Unix + Windows call-sites don't diverge.
-    Ok(())
 }
 
 #[cfg(test)]

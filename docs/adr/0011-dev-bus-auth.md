@@ -69,3 +69,17 @@ The retirement landed in **M5a W1** (post-`v0.4.0-m4`), later than the originall
 The post-supersession dev path is therefore: `mint.sh` produces both mTLS bundle + JWT trust root → `just dev` boots the compose stack with the broker in operator-JWT mode → `iotctl plugin install` mints a per-plugin user JWT for each plugin → the runtime connects with mTLS + JWT.
 
 The two-step retirement (crypto then wiring) is reflected in the M5 plan's M5a/M5b split — a pattern the M4 retro flagged (don't ship "scaffolds claiming to be plugins") and one we deliberately repeated for honesty rather than backdating the ADR closure.
+
+### Windows hardening (Bucket 1 audit, finding M5)
+
+The first cut of the Superseded path (`iotctl plugin install` post-install hook + `iotctl nats {bootstrap,mint-user}`) wrote seed material at the OS-default DACL on Windows: `restrict_permissions` was a `#[cfg(unix)] chmod 0600` plus a `Ok(())` stub on the non-Unix arm. On a multi-user Windows box that left the operator nkey, account nkey, per-plugin user nkey, and `nats.creds` files inheriting the parent dir's ACL — i.e. readable by every local user with read access to the install directory. Each one is full identity material: a leaked operator seed forges any account JWT; an account seed forges any user JWT; a user nkey + creds file is the plugin's broker identity.
+
+The fix shipped under M5a's audit-cleanup pass:
+
+- `crates/iot-cli/src/secrets.rs` — single cross-platform `restrict_permissions` helper. Unix path is the existing `chmod 0600`. Windows path shells out to `icacls <path> /inheritance:r /grant:r <USERNAME>:F` after the file write, stripping inherited ACEs and installing exactly one explicit ACE for the current user. Closest analogue of the Unix mode bits: no inheritance, exactly one principal, owner-only.
+- The trailofbits `windows-acl` crate was the obvious dep but its last release is over four years old and it pulls legacy `winapi 0.3.x` (vs. `windows-sys`); given the seed-file write surface is small (≤6 sites across `cmd_bootstrap`, `cmd_mint_user`, `generate_nats_identity`, and `mint_creds_post_install`), the per-write `icacls` spawn cost was the lower-supply-chain-risk choice.
+- `acl.json` (the manifest-derived ACL snapshot the post-install hook writes alongside `nats.nkey`) is intentionally NOT restricted — it contains the plugin's bus capabilities + public nkey, no secret. Same call shape as the rest of the bundle's manifest + wasm files.
+- `tools/devcerts/mint.sh`'s top-of-file note was extended to point Windows operators at WSL2 (mint.sh's `chmod 600` lines on `*.key` are no-ops on NTFS); the seed-side bootstrapping is owner-locked anyway because `iotctl nats bootstrap` (invoked from inside mint.sh) takes the new ACL path. The TLS dev keys remain workstation-local.
+- `.github/workflows/ci.yml` gained a `test-windows` job running `cargo test -p iot-cli` on `windows-latest`; the unit tests in `secrets::tests` validate the icacls-resulting DACL on Windows and the chmod result on Unix.
+
+Out of scope for this fix: encrypted-at-rest seed storage (future hardening), per-plugin Windows user accounts (same), and macOS — `chmod 0600` already works there via the existing Unix path.

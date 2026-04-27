@@ -10,6 +10,17 @@
 #
 # Requirements: openssl >= 1.1.1. This script uses openssl because it's
 # universally available; a step-cli variant is welcome later.
+#
+# Windows operators: run this script under WSL2 (or Git Bash with openssl
+# on PATH). The `chmod 600` calls below are no-ops on Win32 filesystems —
+# WSL2 mounts NTFS at /mnt/<drive> with `metadata` enabled by default in
+# recent builds, so the mode bits stick. If you must run from native PS,
+# the seed-side hardening (operator.nk + iot-account.nk) is owner-locked
+# anyway: `iotctl nats bootstrap` (invoked at the foot of this script)
+# applies a Windows ACL via `crates/iot-cli/src/secrets.rs`. The TLS
+# private keys (`*.key`) are NOT covered by that path; treat them as
+# dev-only and don't reuse them off your workstation. See M5 audit
+# Bucket 1, finding M5 + the ADR-0011 Windows hardening note.
 
 set -euo pipefail
 
