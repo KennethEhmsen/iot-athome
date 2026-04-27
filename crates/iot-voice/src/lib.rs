@@ -48,6 +48,7 @@ pub mod audio;
 pub mod cpal_audio;
 pub mod intent;
 pub mod pipeline;
+pub mod piper_synth;
 #[cfg(feature = "wake-phrase")]
 pub mod rustpotter_wake;
 pub mod stt;
@@ -64,10 +65,11 @@ pub use intent::{
     Intent, IntentError, IntentParser, IntentSink, LogIntentSink, RuleIntentParser, StubIntentSink,
 };
 pub use pipeline::{Pipeline, PipelineError, PipelineMetrics};
+pub use piper_synth::PiperBinarySynthesizer;
 #[cfg(feature = "wake-phrase")]
 pub use rustpotter_wake::RustpotterWakeDetector;
 pub use stt::{SpeechRecognizer, SttError, StubSpeechRecognizer};
-pub use synth::{StubSynthesizer, SynthError, Synthesizer};
+pub use synth::{StubSynthesizer, SynthError, SynthesisedAudio, Synthesizer};
 pub use wake::{StubWakeDetector, Wake, WakeDetector, WakeError};
 pub use wake_vad::EnergyVadWakeDetector;
 #[cfg(feature = "whisper")]

@@ -118,8 +118,8 @@ commit that implemented the corresponding piece.
 | W4a | Real audio capture via `cpal` (feature: `mic`) | `77491b1` |
 | W4c | Real STT via `whisper-rs` (feature: `stt-whisper`) | `893e45a` |
 | W4b | Energy-VAD wake detector (pure-Rust) | `2551597` |
-| W4b.5 | Phrase-specific wake-word via rustpotter (feature: `wake-phrase`) | this commit |
-| W4d | Real TTS via `piper` | open |
+| W4b.5 | Phrase-specific wake-word via rustpotter (feature: `wake-phrase`) | `ee7ad3f` |
+| W4d | Real TTS via `piper` binary shell-out | this commit |
 
 ### Build-prereq ladder
 
@@ -131,8 +131,8 @@ feature adds one prereq class:
 | (default) | — | rustup toolchain |
 | `mic` (cpal) | iot-voice | system audio libs (alsa-dev on Linux; built-in on Win/macOS) |
 | `wake-phrase` (rustpotter) | iot-voice | none (pure Rust); operator supplies an `.rpw` model file |
+| `stt-piper` (TTS, always-on) | iot-voice | none at build time; runtime needs the `piper` binary on PATH + a voice `.onnx` model. Operator downloads pre-built piper from rhasspy/piper releases (no Rust build deps — sidestepped the CMake cost via shell-out). |
 | `stt-whisper` | iot-voice | **CMake + Clang** on PATH (whisper.cpp build script) |
-| `tts-piper` (future) | iot-voice | CMake + Clang (piper build script — same toolchain as whisper) |
 
 Operators on Windows install the toolchain once with
 `choco install cmake llvm`; macOS via `brew install cmake`;

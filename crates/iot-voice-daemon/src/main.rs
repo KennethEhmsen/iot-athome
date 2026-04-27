@@ -31,8 +31,9 @@ use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand};
 use iot_bus::{Bus, Config as BusConfig};
 use iot_voice::{
-    EnergyVadWakeDetector, IntentParser, Pipeline, RuleIntentParser, SpeechRecognizer,
-    StubAudioSource, StubSpeechRecognizer, StubWakeDetector, WakeDetector,
+    EnergyVadWakeDetector, IntentParser, Pipeline, PiperBinarySynthesizer, RuleIntentParser,
+    SpeechRecognizer, StubAudioSource, StubSpeechRecognizer, StubWakeDetector, Synthesizer,
+    WakeDetector,
 };
 use tracing::{info, warn};
 
@@ -100,6 +101,28 @@ enum Command {
         #[arg(long, env = "IOT_VOICE_WAKE_MODEL")]
         wake_model: Option<std::path::PathBuf>,
     },
+    /// Synthesise `<text>` to a WAV file via the piper TTS
+    /// binary, write to stdout (or `--output <path>`).
+    ///
+    /// Useful as the operator's response-path smoke-test:
+    /// confirms the piper binary + voice model are wired up
+    /// correctly, before the rule engine starts firing
+    /// acknowledgements at synthesis time. M5b W4d.
+    Say {
+        /// Text to synthesise. Multi-word phrases need quoting:
+        /// `iot-voice say "the kitchen light is on"`.
+        text: String,
+        /// Path to a piper `.onnx` voice model. The matching
+        /// `<model>.onnx.json` config file must sit next to it
+        /// (piper requires both).
+        #[arg(long, env = "IOT_VOICE_TTS_MODEL")]
+        tts_model: std::path::PathBuf,
+        /// Write the WAV bytes here. Defaults to `synthesised.wav`
+        /// in the current directory; pass `-` for stdout (e.g.
+        /// `iot-voice say --output - "hello" | aplay`).
+        #[arg(long, default_value = "synthesised.wav")]
+        output: String,
+    },
 }
 
 #[tokio::main]
@@ -111,6 +134,19 @@ async fn main() -> Result<()> {
     });
 
     let cli = Cli::parse();
+
+    // `say` is bus-free — TTS is purely local. Skip the
+    // mTLS/NATS handshake so the operator can smoke-test piper
+    // without the dev stack running.
+    if let Command::Say {
+        text,
+        tts_model,
+        output,
+    } = &cli.command
+    {
+        return cmd_say(text, tts_model, output).await;
+    }
+
     let cfg = BusConfig::from_env(cli.publisher.clone());
     let bus = Bus::connect(cfg)
         .await
@@ -123,7 +159,90 @@ async fn main() -> Result<()> {
             stt_model,
             wake_model,
         } => cmd_listen(bus, use_mic, stt_model, wake_model).await,
+        Command::Say { .. } => unreachable!("handled before bus connect"),
     }
+}
+
+/// `say <text>` — synthesise via piper, write WAV.
+///
+/// Bus-free: this is the local TTS smoke test, no broker needed.
+/// The operator validates piper + voice-model wiring before the
+/// rule engine starts firing acknowledgements.
+async fn cmd_say(text: &str, tts_model: &std::path::Path, output: &str) -> Result<()> {
+    use std::io::Write as _;
+    let mut synth = PiperBinarySynthesizer::new(tts_model);
+    let audio = synth
+        .speak(text)
+        .await
+        .map_err(|e| anyhow::anyhow!("piper synth: {e}"))?;
+    info!(
+        text_len = text.len(),
+        sample_rate = audio.sample_rate,
+        duration_ms = audio.duration_ms,
+        samples = audio.samples.len(),
+        "synthesised; writing WAV"
+    );
+
+    // Re-encode the f32 samples back into a WAV envelope so the
+    // operator can `aplay` / open in any audio tool. Round-trips
+    // through f32 → i16 once.
+    let wav_bytes = encode_wav(&audio.samples, audio.sample_rate);
+
+    if output == "-" {
+        std::io::stdout()
+            .write_all(&wav_bytes)
+            .context("write WAV to stdout")?;
+    } else {
+        std::fs::write(output, &wav_bytes).with_context(|| format!("write {output}"))?;
+        println!(
+            "synthesised {} samples @ {} Hz ({} ms) → {output}",
+            audio.samples.len(),
+            audio.sample_rate,
+            audio.duration_ms,
+        );
+    }
+    Ok(())
+}
+
+/// Encode mono `f32 [-1, 1]` PCM samples + sample rate into a
+/// canonical RIFF/WAVE blob — inverse of the parser in
+/// `iot_voice::piper_synth`. Lets `iot-voice say` write a file
+/// any audio tool can open without depending on a Rust WAV crate.
+///
+/// `try_from` + `unwrap_or` for the size casts: a single TTS
+/// utterance can't conceivably exceed the WAV-32-bit-size cap
+/// (`u32::MAX` ≈ 4 GB ≈ 6 hours of 16-bit 22 kHz mono); on the
+/// theoretical overflow we cap at `u32::MAX` so the WAV header
+/// stays valid even if downstream readers see a truncated `data`
+/// chunk. Better than a panic-on-overflow `as u32`.
+fn encode_wav(samples: &[f32], sample_rate: u32) -> Vec<u8> {
+    let data_bytes = samples.len() * 2;
+    let total_size = u32::try_from(36 + data_bytes).unwrap_or(u32::MAX);
+    let data_size = u32::try_from(data_bytes).unwrap_or(u32::MAX);
+    let byte_rate = sample_rate * 2;
+
+    let mut out = Vec::with_capacity(44 + data_bytes);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&total_size.to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk size
+    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&1u16.to_le_bytes()); // mono
+    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&byte_rate.to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes()); // block align
+    out.extend_from_slice(&16u16.to_le_bytes()); // bits/sample
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_size.to_le_bytes());
+    for s in samples {
+        // f32 [-1, 1] → i16 [-32768, 32767]. clamp + scale, same
+        // shape as the rustpotter wake adapter.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let q = (s.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16;
+        out.extend_from_slice(&q.to_le_bytes());
+    }
+    out
 }
 
 /// `send <text>` — parse, publish one intent, exit.
@@ -382,6 +501,39 @@ mod tests {
                 .map(std::path::PathBuf::as_path),
             Some(std::path::Path::new("/tmp/ggml-base.en.bin")),
         );
+    }
+
+    #[test]
+    fn cli_parses_say_subcommand() {
+        let m = Cli::command()
+            .try_get_matches_from(vec![
+                "iot-voice",
+                "say",
+                "--tts-model",
+                "/tmp/voice.onnx",
+                "hello there",
+            ])
+            .expect("parse `say --tts-model … <text>`");
+        let say_m = m.subcommand_matches("say").expect("say subcommand");
+        assert_eq!(
+            say_m.get_one::<String>("text").map(String::as_str),
+            Some("hello there"),
+        );
+        assert_eq!(
+            say_m
+                .get_one::<std::path::PathBuf>("tts_model")
+                .map(std::path::PathBuf::as_path),
+            Some(std::path::Path::new("/tmp/voice.onnx")),
+        );
+    }
+
+    #[test]
+    fn cli_say_requires_tts_model() {
+        // No --tts-model on `say`; clap should refuse since the
+        // arg is required (no default_value, no `Option<…>`).
+        Cli::command()
+            .try_get_matches_from(vec!["iot-voice", "say", "hello"])
+            .expect_err("expected --tts-model required");
     }
 
     #[test]

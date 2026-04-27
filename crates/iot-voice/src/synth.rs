@@ -28,13 +28,19 @@ pub enum SynthError {
     Backend(String),
 }
 
-/// Synthesised audio output. Same shape as
-/// [`crate::audio::AudioFrame`] — 16 kHz mono `f32`. The daemon's
-/// playback path resamples to whatever the platform output device
-/// expects.
+/// Synthesised audio output — mono `f32` PCM in `[-1.0, 1.0]`.
+///
+/// Sample rate is producer-specific; the field is `pub` so the
+/// daemon's playback path can resample to whatever the platform
+/// output device expects. The stub synthesiser emits at the
+/// pipeline's canonical [`crate::SAMPLE_RATE_HZ`] (16 kHz).
+/// `PiperBinarySynthesizer` typically emits 22.05 kHz (Piper's
+/// default voice rate) — caller resamples at playback.
 #[derive(Debug, Clone)]
 pub struct SynthesisedAudio {
     pub samples: Vec<f32>,
+    /// Sample rate of `samples`, in Hz.
+    pub sample_rate: u32,
     /// Total duration in milliseconds. Caller pre-allocates output
     /// buffers from this.
     pub duration_ms: u32,
@@ -68,6 +74,7 @@ impl Synthesizer for StubSynthesizer {
         let samples = vec![0.0; (crate::SAMPLE_RATE_HZ * duration_ms / 1000) as usize];
         Ok(SynthesisedAudio {
             samples,
+            sample_rate: crate::SAMPLE_RATE_HZ,
             duration_ms,
         })
     }
@@ -85,6 +92,7 @@ mod tests {
         let three = s.speak("hello there friend").await.unwrap();
         assert_eq!(one.duration_ms, 80);
         assert_eq!(three.duration_ms, 240);
+        assert_eq!(one.sample_rate, crate::SAMPLE_RATE_HZ);
     }
 
     #[tokio::test]
